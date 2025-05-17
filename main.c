@@ -147,7 +147,7 @@ int main()
 
     if (pid == 0) {
         setenv("TERM", "xterm-256color", 1);
-        execl("/bin/sh", "sh", NULL);
+        execl("/bin/bash", "bash", NULL);
         perror("execl");
         exit(1);
     }
@@ -242,7 +242,7 @@ int main()
             {
                 if (modifier & OZTERM_KEYM_CTRL)
                 {
-                    if (isgraph(sdl_key))
+                    if (sdl_key >= 0 && sdl_key < 128)
                     {
                         terminal_key = sdl_key;
                     }
