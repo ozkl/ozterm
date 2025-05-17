@@ -209,7 +209,7 @@ void ozterm_line_delete_characters(Ozterm* terminal, int16_t count)
     OztermCell * video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
     int16_t x = terminal->screen_active->cursor_column;
 
-    // Cap delete range to what’s left in line
+    // Cap delete range to what's left in line
     if (x < terminal->column_count)
     {
         if (x + count >= terminal->column_count)
@@ -403,14 +403,16 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     break;
                 case 't': {
                     if (strcmp(effective_param, "11") == 0) {
-                        const char* reply = "\033[1t"; // window is visible
+                        const char* reply = "\033[1t"; // Window is visible
                         write_to_master(terminal, reply, strlen(reply));
-                    } else if (strcmp(param_buf, "22;1") == 0 || strcmp(param_buf, "22;2") == 0) {
-                        // Ignore title save/restore
                     }
-                    else if (strcmp(param_buf, "23;1") == 0 || strcmp(param_buf, "23;2") == 0) {
-                        // Ignore icon name push/pop
-                    } else {
+                    else if (strncmp(param_buf, "22;", 3) == 0) {
+                        // Ignore all title stack ops
+                    }
+                    else if (strncmp(param_buf, "23;", 3) == 0) {
+                        // Ignore icon name stack ops
+                    }
+                    else {
                         handled = 0;
                     }
                     break;
