@@ -1,0 +1,10 @@
+{
+   "tasks": [
+    {
+      "taskName": "build",
+      "command": "make",
+      "args": [
+      ]
+    }
+  ]
+}
