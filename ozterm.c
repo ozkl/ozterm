@@ -46,6 +46,7 @@ void ozterm_put_text(Ozterm* terminal, const uint8_t* text, int32_t size);
 void ozterm_move_cursor(Ozterm* terminal, int16_t row, int16_t column);
 void ozterm_move_cursor_diff(Ozterm* terminal, int16_t row, int16_t column);
 void ozterm_scroll_up(Ozterm* terminal);
+void ozterm_scroll_down_region(Ozterm* terminal, int lines);
 
 
 Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
@@ -65,6 +66,8 @@ Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
 
     terminal->screen_active = terminal->screen_main;
     terminal->alternative_active = 0;
+    terminal->saved_cursor_column = 0;
+    terminal->saved_cursor_row = 0;
     terminal->column_count = column_count;
     terminal->row_count = row_count;
     terminal->scroll_top = 0;
@@ -150,6 +153,40 @@ void ozterm_scroll_up(Ozterm* terminal)
         terminal->refresh_function(terminal);
     }
 }
+
+void ozterm_scroll_down_region(Ozterm* terminal, int lines)
+{
+    if (lines <= 0) lines = 1;
+
+    int top = terminal->scroll_top;
+    int bottom = terminal->scroll_bottom;
+    int columns = terminal->column_count;
+    OztermCell* buf = terminal->screen_active->buffer;
+
+    // Clamp lines to available region
+    if (lines > bottom - top + 1) {
+        lines = bottom - top + 1;
+    }
+
+    // Scroll DOWN: move lines from bottom up to top
+    for (int row = bottom; row >= top + lines; --row) {
+        memcpy(buf + row * columns, buf + (row - lines) * columns, sizeof(OztermCell) * columns);
+    }
+
+    // Clear top N lines
+    for (int row = top; row < top + lines; ++row) {
+        for (int col = 0; col < columns; ++col) {
+            OztermCell* cell = &buf[row * columns + col];
+            cell->character = ' ';
+            cell->color = terminal->color;
+        }
+    }
+
+    if (terminal->refresh_function) {
+        terminal->refresh_function(terminal);
+    }
+}
+
 
 void ozterm_clear(Ozterm* terminal)
 {
@@ -332,6 +369,40 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
             } else if (c == ')') {
                 parse_state = STATE_G1;
             }
+            else if (c == '7') {
+                terminal->saved_cursor_row = terminal->screen_active->cursor_row;
+                terminal->saved_cursor_column = terminal->screen_active->cursor_column;
+                parse_state = STATE_NORMAL;
+            } else if (c == '8') {
+                ozterm_move_cursor(terminal, terminal->saved_cursor_row, terminal->saved_cursor_column);
+                parse_state = STATE_NORMAL;
+            }
+            else if (c == 'c') {
+                // ESC c — Full reset (RIS).
+                ozterm_clear(terminal);
+                ozterm_move_cursor(terminal, 0, 0);
+                parse_state = STATE_NORMAL;
+            } else if (c == 'D') {
+                // ESC D — Index: Move cursor down
+                ozterm_move_cursor_diff(terminal, 1, 0);
+                parse_state = STATE_NORMAL;
+            } else if (c == 'E') {
+                // ESC E — Next line (CR + LF)
+                ozterm_move_cursor(terminal, terminal->screen_active->cursor_row + 1, 0);
+                parse_state = STATE_NORMAL;
+            } else if (c == 'M') {
+                // ESC M — Reverse index (scroll down)
+                ozterm_scroll_down_region(terminal, 1);
+                parse_state = STATE_NORMAL;
+            } else if (c == 'Z') {
+                // ESC Z — Identify terminal (DECID), reply with ESC[?6c
+                const char* reply = "\033[?6c";
+                write_to_master(terminal, reply, strlen(reply));
+                parse_state = STATE_NORMAL;
+            } else if (c == '\\') {
+                // ESC \ — ST (used to end OSC), absorb silently
+                parse_state = STATE_NORMAL;
+            }
             else {
                 parse_state = STATE_NORMAL;
             }
@@ -456,6 +527,10 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                         ozterm_switch_to_alt_screen(terminal);
                     } else if (is_private && strcmp(effective_param, "2004") == 0) {
                         // Enable bracketed paste mode — optional, just silently accept
+                    } else if (is_private && strcmp(effective_param, "25") == 0) {
+                        //terminal->cursor_visible = true;
+                    } else if (is_private && strcmp(effective_param, "12") == 0) {
+                        // enable cursor blink
                     }
                     else {
                         handled = 0;
@@ -466,6 +541,11 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                         ozterm_restore_main_screen(terminal);
                     } else if (is_private && strcmp(effective_param, "2004") == 0) {
                         // Disable bracketed paste mode
+                    }
+                    else if (is_private && strcmp(effective_param, "25") == 0) {
+                        // terminal->cursor_visible = false;
+                    } else if (is_private && strcmp(effective_param, "12") == 0) {
+                        // disable cursor blink
                     }
                     else {
                         handled = 0;

@@ -58,6 +58,8 @@ typedef struct Ozterm
     OztermScreen* screen_alternative;
     OztermScreen* screen_active;
     uint8_t alternative_active;
+    int16_t saved_cursor_row;
+    int16_t saved_cursor_column;
     int16_t row_count;
     int16_t column_count;
     int16_t scroll_top;
