@@ -266,7 +266,7 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
     if ('\n' == c)
     {
         int next_row = terminal->screen_active->cursor_row + 1;
-        if (next_row >= terminal->row_count) {
+        if (next_row >= terminal->scroll_bottom) {
             ozterm_scroll_up(terminal);
             // stay on the last row, column unchanged
         } else {
@@ -590,26 +590,28 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                         terminal->scroll_bottom = terminal->row_count - 1;
                     }
                     break;
-                case 'M': {
+                    case 'M': {
                     int y = terminal->screen_active->cursor_row;
-                    int count = (p1 > 0 ? p1 : 1);
-                    if (y < terminal->scroll_top || y > terminal->scroll_bottom) break;
-                    int lines_to_move = terminal->scroll_bottom - (y + count) + 1;
+                    if (y < terminal->scroll_top || y > terminal->scroll_bottom)
+                        break;
+
                     OztermCell* buf = terminal->screen_active->buffer;
-                    if (lines_to_move > 0) {
-                        for (int i = 0; i < lines_to_move; ++i) {
-                            memcpy(buf + (y + i) * terminal->column_count, buf + (y + i + count) * terminal->column_count, sizeof(OztermCell) * terminal->column_count);
-                        }
+                    int lines_to_move = terminal->scroll_bottom - y;
+                    for (int i = 0; i < lines_to_move; ++i) {
+                        memcpy(buf + (y + i) * terminal->column_count,
+                            buf + (y + i + 1) * terminal->column_count,
+                            sizeof(OztermCell) * terminal->column_count);
                     }
-                    for (int i = terminal->scroll_bottom - count + 1; i <= terminal->scroll_bottom; ++i) {
-                        for (int j = 0; j < terminal->column_count; ++j) {
-                            int index = i * terminal->column_count + j;
-                            buf[index].character = ' ';
-                            buf[index].color = terminal->color;
-                        }
+
+                    // Clear the last line
+                    int last = terminal->scroll_bottom;
+                    for (int j = 0; j < terminal->column_count; ++j) {
+                        buf[last * terminal->column_count + j].character = ' ';
+                        buf[last * terminal->column_count + j].color = terminal->color;
                     }
                     break;
                 }
+
                 case 'L': {
                     int y = terminal->screen_active->cursor_row;
                     int count = (p1 > 0 ? p1 : 1);
