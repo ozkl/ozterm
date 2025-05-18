@@ -47,12 +47,6 @@ void ozterm_move_cursor(Ozterm* terminal, int16_t row, int16_t column);
 void ozterm_move_cursor_diff(Ozterm* terminal, int16_t row, int16_t column);
 void ozterm_scroll_up(Ozterm* terminal);
 
-typedef enum ParseState {
-    STATE_NORMAL,
-    STATE_ESC,
-    STATE_CSI
-} ParseState;
-
 
 Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
 {
@@ -284,22 +278,40 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
     }
 }
 
+static void print_debug_character(uint8_t c)
+{
+    if (c < 0x20 || c > 0x7E) {
+        fprintf(stderr, "DEBUG: Non-printable character: %02X\n", c);
+    } else {
+        fprintf(stderr, "DEBUG: Printable character: '%c' (%02X)\n", c, c);
+    }
+}
+
 void ozterm_put_character(Ozterm* terminal, uint8_t c)
 {
-    static enum ParseState { STATE_NORMAL, STATE_ESC, STATE_CSI } parse_state = STATE_NORMAL;
+    static enum ParseState { STATE_NORMAL, STATE_ESC, STATE_CSI, STATE_OSC, STATE_G0, STATE_G1 } parse_state = STATE_NORMAL;
     static char param_buf[32];
     static int param_len = 0;
     static char seq_buf[64];
     static int seq_len = 0;
+    static char osc_buf[64];
+    static int osc_index = 0;
     static char final_byte = 0;
     static uint8_t is_private = 0;
+
+    //print_debug_character(c);
 
     switch (parse_state) {
         case STATE_NORMAL:
             if (c == '\033') {
                 parse_state = STATE_ESC;
-            } else {
-                ozterm_put_character_and_cursor(terminal, c);
+            } 
+            else
+            {
+                if ((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\b')
+                {  
+                    ozterm_put_character_and_cursor(terminal, c);
+                }
             }
             break;
 
@@ -311,10 +323,36 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                 is_private = 0;
                 param_buf[0] = '\0';
                 seq_buf[0] = '\0';
-            } else {
+            } else if (c == ']') {
+                parse_state = STATE_OSC;
+                osc_index = 0;
+                osc_buf[0] = '\0';
+            } else if (c == '(') {
+                parse_state = STATE_G0;
+            } else if (c == ')') {
+                parse_state = STATE_G1;
+            }
+            else {
                 parse_state = STATE_NORMAL;
             }
             break;
+        case STATE_OSC:
+            if (c == '\a') {  // BEL = end of OSC
+                parse_state = STATE_NORMAL;
+                osc_buf[osc_index] = '\0';
+            } else if (c == '\033') {
+                // ESC — maybe ST terminator?
+                parse_state = STATE_ESC;  // check for ESC \ in next char
+            } else if (osc_index < sizeof(osc_buf) - 1) {
+                osc_buf[osc_index++] = c;
+                osc_buf[osc_index] = '\0';
+            }
+            break;
+            case STATE_G0:
+            case STATE_G1:
+                // Valid values: 'B' (ASCII), '0' (line drawing), etc.
+                parse_state = STATE_NORMAL;
+                break;
 
         case STATE_CSI:
             if (seq_len < (int)sizeof(seq_buf) - 1) {
@@ -384,21 +422,53 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                 case 'K':
                     ozterm_clear_line_right(terminal);
                     break;
-                case 'm':
-                    if (strncmp(effective_param, "31", 2) == 0) {
-                        // ozterm_set_fg_color(terminal, RED);
-                    } else if (strncmp(effective_param, "0", 1) == 0) {
-                        // ozterm_reset_attrs(terminal);
+                case 'm': {
+                    handled = 1;  // will reset to 0 only if nothing matches
+                    char* p = param_buf;
+                    while (p && *p) {
+                        int val = strtol(p, &p, 10);
+
+                        switch (val) {
+                            case 0:
+                                //terminal_reset_attrs(terminal);
+                                break;
+                            case 1:
+                                //terminal_set_bold(terminal, true);
+                                //printf("Bold\n");
+                                break;
+                            case 22:
+                                //terminal_set_bold(terminal, false);
+                                break;
+                            case 31:
+                                //ozterm_set_fg_color(terminal, RED);
+                                break;
+                            default:
+                                // Optional: printf("Unhandled SGR: %d\n", val);
+                                break;
+                        }
+
+                        if (*p == ';') p++;  // skip to next param
                     }
                     break;
+                }
                 case 'h':
                     if (is_private && strcmp(effective_param, "1049") == 0) {
                         ozterm_switch_to_alt_screen(terminal);
+                    } else if (is_private && strcmp(effective_param, "2004") == 0) {
+                        // Enable bracketed paste mode — optional, just silently accept
+                    }
+                    else {
+                        handled = 0;
                     }
                     break;
                 case 'l':
                     if (is_private && strcmp(effective_param, "1049") == 0) {
                         ozterm_restore_main_screen(terminal);
+                    } else if (is_private && strcmp(effective_param, "2004") == 0) {
+                        // Disable bracketed paste mode
+                    }
+                    else {
+                        handled = 0;
                     }
                     break;
                 case 't': {
@@ -521,9 +591,12 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     final_byte);
             }
 
+            //fprintf(stderr, "CSI parsed: [%s%c\n", param_buf, final_byte);
+
             parse_state = STATE_NORMAL;
             param_len = 0;
             seq_len = 0;
+            
             break;
     }
 }
