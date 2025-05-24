@@ -338,6 +338,7 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
     }
 }
 
+
 void ozterm_put_character(Ozterm* terminal, uint8_t c)
 {
     static enum ParseState { STATE_NORMAL, STATE_ESC, STATE_CSI, STATE_OSC, STATE_G0, STATE_G1 } parse_state = STATE_NORMAL;
@@ -506,7 +507,17 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
             const char* effective_param = param_buf;
 
             int p1 = 1, p2 = 1;
-            sscanf(effective_param, "%d;%d", &p1, &p2);
+            
+            char *semi = strchr(effective_param, ';');
+            if (semi) {
+                *semi = '\0';
+                p1 = atoi(effective_param);
+                p2 = atoi(semi + 1);
+                *semi = ';';  // restore separator (optional)
+            } else if (*effective_param) {
+                p1 = atoi(effective_param);
+            }
+
             int handled = 1;
 
             switch (final_byte)
