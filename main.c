@@ -37,6 +37,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,8 +61,10 @@ void measure_glyph_size(TTF_Font* font)
     TTF_SizeText(font, "M", &g_font_width, &g_font_height);  // "M" is usually the widest monospaced char
 }
 
-void build_g_glyph_cache(SDL_Renderer* renderer, TTF_Font* font, SDL_Color fg) {
-    for (int i = 32; i < 127; ++i) {
+void build_g_glyph_cache(SDL_Renderer* renderer, TTF_Font* font, SDL_Color fg)
+{
+    for (int i = 32; i < 127; ++i)
+    {
         char ch[2] = {i, 0};
         SDL_Surface* s = TTF_RenderText_Blended(font, ch, fg);
         g_glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, s);
@@ -69,7 +72,8 @@ void build_g_glyph_cache(SDL_Renderer* renderer, TTF_Font* font, SDL_Color fg) {
     }
 
     g_glyph_cursor = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, g_font_width, g_font_height);
-    if (!g_glyph_cursor) {
+    if (!g_glyph_cursor)
+    {
         fprintf(stderr, "Failed to create cursor texture: %s\n", SDL_GetError());
         return;
     }
@@ -86,8 +90,10 @@ void render_screen(SDL_Renderer* renderer, TTF_Font* font, Ozterm* terminal) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
-    for (int y = 0; y < terminal->row_count; ++y) {
-        for (int x = 0; x < terminal->column_count; ++x) {
+    for (int y = 0; y < terminal->row_count; ++y)
+    {
+        for (int x = 0; x < terminal->column_count; ++x)
+        {
             SDL_Rect dst = {x * g_font_width, y * g_font_height, g_font_width, g_font_height};
             OztermCell * video = terminal->screen_active->buffer + (y * terminal->column_count + x);
             char ch = video->character;
@@ -127,13 +133,28 @@ static void terminal_move_cursor(Ozterm* terminal, int16_t old_row, int16_t old_
     g_refresh_screen = 1;
 }
 
+static void update_pty_winsize(int master_fd, int cols, int rows)
+{
+    struct winsize ws =
+    {
+        .ws_col = cols,
+        .ws_row = rows,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+
+    ioctl(master_fd, TIOCSWINSZ, &ws);
+}
+
+
 int main()
 {
     SDL_Init(SDL_INIT_VIDEO);
     TTF_Init();
     
     TTF_Font* font = TTF_OpenFont("fonts/DejaVuSansMono.ttf", FONT_SIZE);
-    if (!font) {
+    if (!font)
+    {
         fprintf(stderr, "Failed to load font: %s\n", TTF_GetError());
         exit(1);
     }
@@ -145,7 +166,12 @@ int main()
 
     pid_t pid = forkpty(&g_master_fd, NULL, NULL, NULL);
 
-    if (pid == 0) {
+    if (pid > 0)
+    {
+        update_pty_winsize(g_master_fd, COLS, ROWS);
+    }
+    else if (pid == 0)
+    {
         setenv("TERM", "xterm-256color", 1);
         execl("/bin/bash", "bash", NULL);
         perror("execl");
@@ -219,7 +245,6 @@ int main()
                 case SDLK_END:      terminal_key = OZTERM_KEY_END; break;
                 case SDLK_PAGEUP:   terminal_key = OZTERM_KEY_PAGEUP; break;
                 case SDLK_PAGEDOWN: terminal_key = OZTERM_KEY_PAGEDOWN; break;
-
                 case SDLK_F1:  terminal_key = OZTERM_KEY_F1; break;
                 case SDLK_F2:  terminal_key = OZTERM_KEY_F2; break;
                 case SDLK_F3:  terminal_key = OZTERM_KEY_F3; break;
