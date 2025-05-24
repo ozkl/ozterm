@@ -12,3 +12,5 @@ It handles all escape sequences. You only implement your window events and drawi
 That's all. Now you have a working terminal without any dependency.
 
 main.c implements a sample terminal using SDL library.
+
+![Ozterm](screenshots/ozterm.png)
