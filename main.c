@@ -110,9 +110,11 @@ void build_g_glyph_cache(SDL_Renderer* renderer, TTF_Font* font, SDL_Color fg)
 
 int get_scrollbar_height(Ozterm* term)
 {
-    int win_height = term->row_count * g_font_height;
-    int total_lines = ozterm_get_scroll_count(term) + term->row_count;
-    int visible_lines = term->row_count;
+    int16_t row_count = ozterm_get_row_count(term);
+
+    int win_height = row_count * g_font_height;
+    int total_lines = ozterm_get_scroll_count(term) + row_count;
+    int visible_lines = row_count;
 
     // Calculate scrollbar height and position
     float visible_ratio = (float)visible_lines / total_lines;
@@ -131,8 +133,8 @@ void draw_scrollbar(SDL_Renderer* renderer, Ozterm* term)
     {
         int scroll_offset = ozterm_get_scroll(term);
 
-        int win_height = term->row_count * g_font_height;
-        int bar_x = term->column_count * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
+        int win_height = ozterm_get_row_count(term) * g_font_height;
+        int bar_x = ozterm_get_column_count(term) * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
 
         int bar_height = get_scrollbar_height(term);
 
@@ -151,12 +153,15 @@ void draw_scrollbar(SDL_Renderer* renderer, Ozterm* term)
 
 void draw_cursor(SDL_Renderer* renderer, Ozterm* term)
 {
-    OztermCell* row = ozterm_get_row(term, term->screen_active->cursor_row);
-    OztermCell* cell = row + term->screen_active->cursor_column;
+    int16_t cursor_row = ozterm_get_cursor_row(term);
+    int16_t cursor_column = ozterm_get_cursor_column(term);
+
+    OztermCell* row = ozterm_get_row_data(term, cursor_row);
+    OztermCell* cell = row + cursor_column;
 
     SDL_Rect dst = {
-        term->screen_active->cursor_column * g_font_width,
-        term->screen_active->cursor_row * g_font_height,
+        cursor_column * g_font_width,
+        cursor_row * g_font_height,
         g_font_width,
         g_font_height
     };
@@ -168,8 +173,7 @@ void draw_cursor(SDL_Renderer* renderer, Ozterm* term)
     if (bg == fg)
     {
         //fallback to default reverse
-        bg = term->fg_color_default;
-        fg = term->bg_color_default;
+        ozterm_get_default_color(term, &bg, &fg);
     }
 
     if (bg >= 0 && bg < sizeof(g_ansi_colors))
@@ -197,11 +201,14 @@ void render_screen(SDL_Renderer* renderer, TTF_Font* font, Ozterm* term)
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
-    for (int y = 0; y < term->row_count; ++y)
-    {
-        OztermCell* row = ozterm_get_row(term, y);
+    int16_t row_count = ozterm_get_row_count(term);
+    int16_t column_count = ozterm_get_column_count(term);
 
-        for (int x = 0; x < term->column_count; ++x)
+    for (int y = 0; y < row_count; ++y)
+    {
+        OztermCell* row = ozterm_get_row_data(term, y);
+
+        for (int x = 0; x < column_count; ++x)
         {
             SDL_Rect dst = {x * g_font_width, y * g_font_height, g_font_width, g_font_height};
 
@@ -327,11 +334,9 @@ int main()
     memset(&terminal, 0, sizeof(Terminal));
 
     Ozterm * term = ozterm_create(ROWS, COLS);
-    term->write_to_master_function = write_to_master;
-    term->refresh_function = terminal_refresh;
-    term->set_character_function = terminal_set_character;
-    term->move_cursor_function = terminal_move_cursor;
-    term->custom_data = &terminal;
+    ozterm_set_write_to_master_callback(term, write_to_master);
+    ozterm_set_render_callbacks(term, terminal_refresh, terminal_set_character, terminal_move_cursor);
+    ozterm_set_custom_data(term, &terminal);
 
     terminal.term = term;
 
@@ -442,7 +447,7 @@ int main()
             int mouse_x = e.button.x;
             int mouse_y = e.button.y;
 
-            int scrollbar_x = terminal.term->column_count * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
+            int scrollbar_x = ozterm_get_column_count(terminal.term) * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
             if (mouse_x >= scrollbar_x)
             {
                 terminal.scrollbar_dragging = 1;
@@ -461,7 +466,7 @@ int main()
             {
                 int delta_y = e.motion.y - terminal.scrollbar_drag_start_y;
 
-                int win_height = terminal.term->row_count * g_font_height;
+                int win_height = ozterm_get_row_count(terminal.term) * g_font_height;
                 int height = win_height - get_scrollbar_height(terminal.term);
                 float ratio = (float)delta_y / (float)height;
 

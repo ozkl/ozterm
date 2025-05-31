@@ -45,44 +45,6 @@ typedef void (*OztermMoveCursor)(Ozterm* terminal, int16_t old_row, int16_t old_
 typedef void (*OztermWriteToMaster)(Ozterm* terminal, const uint8_t* data, int32_t size);
 
 
-typedef struct OztermScreen
-{
-    OztermCell * buffer;
-    int16_t cursor_row;
-    int16_t cursor_column;
-    uint8_t fg_color;
-    uint8_t bg_color;
-    uint8_t attr_inverse;
-} OztermScreen;
-
-#define SCROLLBACK_LINES 1024
-
-typedef struct Ozterm
-{
-    OztermScreen* screen_main;
-    OztermScreen* screen_alternative;
-    OztermScreen* screen_active;
-    uint8_t alternative_active;
-    int16_t saved_cursor_row;
-    int16_t saved_cursor_column;
-    int16_t row_count;
-    int16_t column_count;
-    int16_t scroll_top;
-    int16_t scroll_bottom;
-    uint8_t fg_color_default;
-    uint8_t bg_color_default;
-    uint8_t DECCKM;
-    void* custom_data;
-    OztermCell** scrollback;     // Array of pointers to lines
-    int16_t scrollback_head;         // Next line to write
-    int16_t scrollback_count;        // Total filled lines
-    int16_t scroll_offset;           // Current scroll view offset
-    OztermRefresh refresh_function;
-    OztermSetCharacter set_character_function;
-    OztermMoveCursor move_cursor_function;
-    OztermWriteToMaster write_to_master_function;
-} Ozterm;
-
 typedef enum OztermKeyModifier
 {
     OZTERM_KEYM_NONE = 0,
@@ -125,7 +87,17 @@ typedef enum OztermKeyModifier
 
 Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count);
 void ozterm_destroy(Ozterm* terminal);
-OztermCell* ozterm_get_row(Ozterm* terminal, int16_t row);
+void ozterm_set_write_to_master_callback(Ozterm* terminal, OztermWriteToMaster function);
+void ozterm_set_render_callbacks(Ozterm* terminal, OztermRefresh refresh_func, OztermSetCharacter character_func, OztermMoveCursor cursor_func);
+void ozterm_set_custom_data(Ozterm* terminal, void* custom_data);
+void* ozterm_get_custom_data(Ozterm* terminal);
+int16_t ozterm_get_row_count(Ozterm* terminal);
+int16_t ozterm_get_column_count(Ozterm* terminal);
+int16_t ozterm_get_cursor_row(Ozterm* terminal);
+int16_t ozterm_get_cursor_column(Ozterm* terminal);
+OztermCell* ozterm_get_row_data(Ozterm* terminal, int16_t row);
+void ozterm_set_default_color(Ozterm* terminal, uint8_t fg, uint8_t bg);
+void ozterm_get_default_color(Ozterm* terminal, uint8_t* fg, uint8_t* bg);
 
 //this is scroll back mechanism, not related to the scrolling inside page or region
 //scroll_offset is based from last line
