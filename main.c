@@ -58,7 +58,6 @@
 static int g_font_width = 0;
 static int g_font_height = 0;
 static SDL_Texture* g_glyph_cache[128];
-static SDL_Texture* g_glyph_cursor = NULL;
 
 static int g_refresh_screen = 0;
 static int g_master_fd = -1;
@@ -70,6 +69,27 @@ typedef struct Terminal
     int scrollbar_drag_start_y;
     int scrollbar_scroll_start_offset;
 } Terminal;
+
+SDL_Color g_ansi_colors[16] = {
+    {0, 0, 0},       // Black
+    {205, 0, 0},     // Red
+    {0, 205, 0},     // Green
+    {205, 205, 0},   // Yellow
+    {0, 0, 238},     // Blue
+    {205, 0, 205},   // Magenta
+    {0, 205, 205},   // Cyan
+    {229, 229, 229}, // White (light gray)
+
+    {127, 127, 127}, // Bright Black (dark gray)
+    {255, 0, 0},     // Bright Red
+    {0, 255, 0},     // Bright Green
+    {255, 255, 0},   // Bright Yellow
+    {92, 92, 255},   // Bright Blue
+    {255, 0, 255},   // Bright Magenta
+    {0, 255, 255},   // Bright Cyan
+    {255, 255, 255}  // Bright White
+};
+
 
 
 void measure_glyph_size(TTF_Font* font)
@@ -86,25 +106,12 @@ void build_g_glyph_cache(SDL_Renderer* renderer, TTF_Font* font, SDL_Color fg)
         g_glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, s);
         SDL_FreeSurface(s);
     }
-
-    g_glyph_cursor = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, g_font_width, g_font_height);
-    if (!g_glyph_cursor)
-    {
-        fprintf(stderr, "Failed to create cursor texture: %s\n", SDL_GetError());
-        return;
-    }
-    // Set target to the texture and draw to it
-    SDL_SetRenderTarget(renderer, g_glyph_cursor);
-    SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); // Red
-    SDL_RenderClear(renderer);
-    // Reset render target to default
-    SDL_SetRenderTarget(renderer, NULL);
 }
 
 int get_scrollbar_height(Ozterm* term)
 {
     int win_height = term->row_count * g_font_height;
-    int total_lines = term->scrollback_count + term->row_count;
+    int total_lines = ozterm_get_scroll_count(term) + term->row_count;
     int visible_lines = term->row_count;
 
     // Calculate scrollbar height and position
@@ -117,17 +124,19 @@ int get_scrollbar_height(Ozterm* term)
 
 void draw_scrollbar(SDL_Renderer* renderer, Ozterm* term)
 {
+    int16_t scrollback_count = ozterm_get_scroll_count(term);
+
     // Only show scrollbar if scrollback exists
-    if (term->scrollback_count > 0)
+    if (scrollback_count > 0)
     {
-        int scroll_offset = term->scroll_offset;
+        int scroll_offset = ozterm_get_scroll(term);
 
         int win_height = term->row_count * g_font_height;
         int bar_x = term->column_count * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
 
         int bar_height = get_scrollbar_height(term);
 
-        int max_offset = term->scrollback_count;
+        int max_offset = scrollback_count;
         if (max_offset == 0) max_offset = 1; // avoid divide-by-zero
 
         float scroll_ratio = (float)scroll_offset / max_offset;
@@ -137,6 +146,49 @@ void draw_scrollbar(SDL_Renderer* renderer, Ozterm* term)
 
         SDL_SetRenderDrawColor(renderer, SCROLLBAR_COLOR_R, SCROLLBAR_COLOR_G, SCROLLBAR_COLOR_B, 255);
         SDL_RenderFillRect(renderer, &bar);
+    }
+}
+
+void draw_cursor(SDL_Renderer* renderer, Ozterm* term)
+{
+    OztermCell* row = ozterm_get_row(term, term->screen_active->cursor_row);
+    OztermCell* cell = row + term->screen_active->cursor_column;
+
+    SDL_Rect dst = {
+        term->screen_active->cursor_column * g_font_width,
+        term->screen_active->cursor_row * g_font_height,
+        g_font_width,
+        g_font_height
+    };
+
+    //reverse
+    uint8_t bg = cell->fg_color;
+    uint8_t fg = cell->bg_color;
+
+    if (bg == fg)
+    {
+        //fallback to default reverse
+        bg = term->fg_color_default;
+        fg = term->bg_color_default;
+    }
+
+    if (bg >= 0 && bg < sizeof(g_ansi_colors))
+    {
+        SDL_Color color = g_ansi_colors[bg];
+        SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+        SDL_RenderFillRect(renderer, &dst);
+    }
+
+    char ch = cell->character;
+    if (ch >= 32 && ch < 127)
+    {
+        if (fg >= 0 && fg < sizeof(g_ansi_colors))
+        {
+            SDL_Color color = g_ansi_colors[fg];
+            SDL_SetTextureColorMod(g_glyph_cache[ch], color.r, color.g, color.b);
+        }
+
+        SDL_RenderCopy(renderer, g_glyph_cache[(int)ch], NULL, &dst);
     }
 }
 
@@ -157,23 +209,33 @@ void render_screen(SDL_Renderer* renderer, TTF_Font* font, Ozterm* term)
 
             char ch = cell->character;
             if (ch >= 32 && ch < 127)
+            {
+                if (cell->bg_color >= 0 && cell->bg_color < sizeof(g_ansi_colors))
+                {
+                    SDL_Color bg = g_ansi_colors[cell->bg_color];
+                    SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, 255);
+                    SDL_RenderFillRect(renderer, &dst);
+                }
+
+                if (cell->fg_color >= 0 && cell->fg_color < sizeof(g_ansi_colors))
+                {
+                    SDL_Color fg = g_ansi_colors[cell->fg_color];
+                    SDL_SetTextureColorMod(g_glyph_cache[ch], fg.r, fg.g, fg.b);
+                }
+
                 SDL_RenderCopy(renderer, g_glyph_cache[(int)ch], NULL, &dst);
+            }
         }
     }
 
-    // Only draw the cursor when not scrolled
-    if (term->scroll_offset == 0) {
-        SDL_Rect cursor_dst = {
-            term->screen_active->cursor_column * g_font_width,
-            term->screen_active->cursor_row * g_font_height,
-            g_font_width,
-            g_font_height
-        };
-        SDL_RenderCopy(renderer, g_glyph_cursor, NULL, &cursor_dst);
-    }
+    int16_t scroll_offset = ozterm_get_scroll(term);
 
-    if (term->scroll_offset > 0)
+    
+
+    if (scroll_offset > 0)
         draw_scrollbar(renderer, term);
+    else if (scroll_offset == 0)
+        draw_cursor(renderer, term); // Only draw the cursor when not scrolled
 
     SDL_RenderPresent(renderer);
 }
@@ -192,10 +254,12 @@ static void terminal_refresh(Ozterm* term)
     g_refresh_screen = 1;
 }
 
-static void terminal_set_character(Ozterm* term, int16_t row, int16_t column, uint8_t character)
+static void terminal_set_character(Ozterm* term, int16_t row, int16_t column, OztermCell * cell)
 {
     //TODO: optimize by only updating individual characters not full screen
     g_refresh_screen = 1;
+
+    ozterm_scroll(term, 0);
 }
 
 static void terminal_move_cursor(Ozterm* term, int16_t old_row, int16_t old_column, int16_t row, int16_t column)
@@ -204,7 +268,7 @@ static void terminal_move_cursor(Ozterm* term, int16_t old_row, int16_t old_colu
     g_refresh_screen = 1;
 }
 
-static void update_pty_winsize(int master_fd, int cols, int rows)
+static void update_pty_winsize(int fd, int cols, int rows)
 {
     struct winsize ws =
     {
@@ -214,7 +278,7 @@ static void update_pty_winsize(int master_fd, int cols, int rows)
         .ws_ypixel = 0,
     };
 
-    ioctl(master_fd, TIOCSWINSZ, &ws);
+    ioctl(fd, TIOCSWINSZ, &ws);
 }
 
 
@@ -243,6 +307,8 @@ int main()
     }
     else if (pid == 0)
     {
+        update_pty_winsize(STDOUT_FILENO, COLS, ROWS);
+
         setenv("TERM", "xterm-256color", 1);
         execl("/bin/bash", "bash", NULL);
         perror("execl");
@@ -381,7 +447,7 @@ int main()
             {
                 terminal.scrollbar_dragging = 1;
                 terminal.scrollbar_drag_start_y = mouse_y;
-                terminal.scrollbar_scroll_start_offset = terminal.term->scroll_offset;
+                terminal.scrollbar_scroll_start_offset = ozterm_get_scroll(terminal.term);
             }
         }
         else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT)
@@ -390,7 +456,7 @@ int main()
         }
         else if (e.type == SDL_MOUSEMOTION && terminal.scrollbar_dragging)
         {
-            int total_scroll = terminal.term->scrollback_count;
+            int total_scroll = ozterm_get_scroll_count(terminal.term);
             if (total_scroll > 0)
             {
                 int delta_y = e.motion.y - terminal.scrollbar_drag_start_y;

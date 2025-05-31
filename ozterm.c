@@ -39,7 +39,9 @@
 
 //Internal API
 uint8_t ozterm_get_character(Ozterm * terminal, int16_t row, int16_t column);
+static void ozterm_set_character(Ozterm * terminal, int16_t row, int16_t column, uint8_t character, uint8_t callback);
 void ozterm_reset_attributes(Ozterm* terminal);
+void ozterm_reset_attributes_screen(Ozterm* terminal, OztermScreen* screen);
 void ozterm_clear(Ozterm* terminal);
 void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count);
 void ozterm_line_delete_characters(Ozterm* terminal, int16_t count);
@@ -91,7 +93,8 @@ Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
     terminal->row_count = row_count;
     terminal->scroll_top = 0;
     terminal->scroll_bottom = terminal->row_count - 1;
-    terminal->color = 0x0A;
+    terminal->fg_color_default = 7;
+    terminal->bg_color_default = 0;
 
     terminal->scrollback = malloc_impl(sizeof(OztermCell*) * SCROLLBACK_LINES);
     for (int i = 0; i < SCROLLBACK_LINES; ++i)
@@ -103,6 +106,8 @@ Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
     terminal->scrollback_count = 0;
     terminal->scroll_offset = 0;
 
+    ozterm_reset_attributes_screen(terminal, terminal->screen_main);
+    ozterm_reset_attributes_screen(terminal, terminal->screen_alternative);
 
     ozterm_clear(terminal);
 
@@ -154,7 +159,15 @@ OztermCell* ozterm_get_row(Ozterm* terminal, int16_t row)
 
 void ozterm_reset_attributes(Ozterm* terminal)
 {
-    terminal->screen_active->attr_protected = 0;
+    ozterm_reset_attributes_screen(terminal, terminal->screen_active);
+}
+
+void ozterm_reset_attributes_screen(Ozterm* terminal, OztermScreen* screen)
+{
+    screen->fg_color = terminal->fg_color_default;
+    screen->bg_color = terminal->bg_color_default;
+    
+    screen->attr_inverse = 0;
 }
 
 void ozterm_scroll(Ozterm* terminal, int16_t scroll_offset)
@@ -180,6 +193,11 @@ int16_t ozterm_get_scroll(Ozterm* terminal)
     return terminal->scroll_offset;
 }
 
+int16_t ozterm_get_scroll_count(Ozterm* terminal)
+{
+    return terminal->scrollback_count;
+}
+
 static void write_to_master(Ozterm* terminal, const char* data, int32_t size)
 {
     if (terminal->write_to_master_function && size > 0)
@@ -192,7 +210,9 @@ void ozterm_switch_to_alt_screen(Ozterm* terminal)
 {
     terminal->alternative_active = 1;
     terminal->screen_active = terminal->screen_alternative;
-    
+
+    //clear alternate screen
+    ozterm_reset_attributes(terminal);
     ozterm_clear(terminal);
 
     if (terminal->refresh_function)
@@ -216,6 +236,38 @@ uint8_t ozterm_get_character(Ozterm * terminal, int16_t row, int16_t column)
 {
     OztermCell * video = terminal->screen_active->buffer + (row * terminal->column_count + column);
     return video->character;
+}
+
+static uint8_t ozterm_is_cell_writable(Ozterm * terminal, OztermCell * cell)
+{
+    return 1;
+}
+
+static void ozterm_set_character(Ozterm * terminal, int16_t row, int16_t column, uint8_t character, uint8_t callback)
+{
+    if (row >= 0 && row < terminal->row_count && column >= 0 && column < terminal->column_count)
+    {
+        OztermCell * cell = terminal->screen_active->buffer + (row * terminal->column_count + column);
+
+        if (ozterm_is_cell_writable(terminal, cell))
+        {
+            cell->character = character;
+
+            if (terminal->screen_active->attr_inverse)
+            {
+                cell->fg_color = terminal->screen_active->bg_color;
+                cell->bg_color = terminal->screen_active->fg_color;
+            }
+            else
+            {
+                cell->fg_color = terminal->screen_active->fg_color;
+                cell->bg_color = terminal->screen_active->bg_color;
+            }
+
+            if (callback && terminal->set_character_function)
+                terminal->set_character_function(terminal, row, column, cell);
+        }
+    }
 }
 
 void ozterm_scroll_up(Ozterm* terminal, int lines)
@@ -258,7 +310,7 @@ void ozterm_scroll_up_region(Ozterm* terminal, int lines)
             int from = (y + lines) * columns + x;
             int to = y * columns + x;
 
-            if (!buf[to].protected)
+            if (ozterm_is_cell_writable(terminal, &buf[to]))
             {
                 buf[to] = buf[from];
             }
@@ -270,10 +322,7 @@ void ozterm_scroll_up_region(Ozterm* terminal, int lines)
     {
         for (int col = 0; col < columns; ++col)
         {
-            int idx = row * columns + col;
-            buf[idx].character = ' ';
-            buf[idx].color = terminal->color;
-            buf[idx].protected = 0;
+            ozterm_set_character(terminal, row, col, ' ', 0);
         }
     }
 
@@ -304,23 +353,19 @@ void ozterm_scroll_down_region(Ozterm* terminal, int lines)
             int to = row * columns + col;
             int from = (row - lines) * columns + col;
 
-            if (!buf[to].protected)
+            if (ozterm_is_cell_writable(terminal, &buf[to]))
             {
                 buf[to] = buf[from];
             }
         }
     }
 
-
     // Clear top N lines
     for (int row = top; row < top + lines; ++row)
     {
         for (int col = 0; col < columns; ++col)
         {
-            OztermCell* cell = &buf[row * columns + col];
-            cell->character = ' ';
-            cell->color = terminal->color;
-            cell->protected = 0;
+            ozterm_set_character(terminal, row, col, ' ', 0);
         }
     }
 
@@ -351,7 +396,7 @@ static void ozterm_insert_lines(Ozterm* terminal, int from_row, int count)
             int to = row * columns + col;
             int from = (row - count) * columns + col;
 
-            if (!buf[to].protected)
+            if (ozterm_is_cell_writable(terminal, &buf[to]))
                 buf[to] = buf[from];
         }
     }
@@ -361,10 +406,7 @@ static void ozterm_insert_lines(Ozterm* terminal, int from_row, int count)
     {
         for (int col = 0; col < columns; ++col)
         {
-            int idx = row * columns + col;
-            buf[idx].character = ' ';
-            buf[idx].color = terminal->color;
-            buf[idx].protected = 0;
+            ozterm_set_character(terminal, row, col, ' ', 0);
         }
     }
 
@@ -395,7 +437,7 @@ static void ozterm_delete_lines(Ozterm* terminal, int from_row, int count)
             int to = row * columns + col;
             int from = (row + count) * columns + col;
 
-            if (!buf[to].protected)
+            if (ozterm_is_cell_writable(terminal, &buf[to]))
                 buf[to] = buf[from];
         }
     }
@@ -405,10 +447,7 @@ static void ozterm_delete_lines(Ozterm* terminal, int from_row, int count)
     {
         for (int col = 0; col < columns; ++col)
         {
-            int idx = row * columns + col;
-            buf[idx].character = ' ';
-            buf[idx].color = terminal->color;
-            buf[idx].protected = 0;
+            ozterm_set_character(terminal, row, col, ' ', 0);
         }
     }
 
@@ -419,22 +458,23 @@ static void ozterm_delete_lines(Ozterm* terminal, int from_row, int count)
 
 void ozterm_clear(Ozterm* terminal)
 {
-    OztermCell * video = terminal->screen_active->buffer;
-    int i = 0;
-
-    for (i = 0; i < terminal->row_count * terminal->column_count; ++i)
+    for (int row = 0; row < terminal->row_count; ++row)
     {
-        video[i].character = ' ';
-        video[i].protected = 0;
-        video[i].color = terminal->color;
+        for (int col = 0; col < terminal->column_count; ++col)
+        {
+            ozterm_set_character(terminal, row, col, ' ', 0);
+        }
     }
 
     ozterm_move_cursor(terminal, 0, 0);
+
+    if (terminal->refresh_function)
+        terminal->refresh_function(terminal);
 }
 
 void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count)
 {
-    OztermCell *video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
+    OztermCell *cell = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
     int16_t x = terminal->screen_active->cursor_column;
 
     if (x >= terminal->column_count)
@@ -443,23 +483,24 @@ void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count)
     if (x + count >= terminal->column_count)
         count = terminal->column_count - x;
 
-    // Shift cells to the right (skip protected targets)
+    // Shift cells to the right
     for (int i = terminal->column_count - 1; i >= x + count; --i)
     {
-        if (!video[i].protected)
+        if (ozterm_is_cell_writable(terminal, &cell[i]))
         {
             // Find the source to copy from
             int src = i - count;
-            // Skip protected sources
-            while (src >= x && video[src].protected)
-                src--;
 
             if (src >= x)
-                video[i] = video[src];
-            else {
-                video[i].character = ' ';
-                video[i].color = terminal->color;
-                video[i].protected = 0;
+            {
+                cell[i] = cell[src];
+
+                if (terminal->set_character_function)
+                    terminal->set_character_function(terminal, terminal->screen_active->cursor_row, i, &cell[i]);
+            }
+            else
+            {
+                ozterm_set_character(terminal, terminal->screen_active->cursor_row, i, c, 1);
             }
         }
     }
@@ -467,18 +508,16 @@ void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count)
     // Fill inserted area
     for (int i = 0; i < count; ++i)
     {
-        if (!video[x + i].protected)
+        if (ozterm_is_cell_writable(terminal, &cell[x + i]))
         {
-            video[x + i].character = ' ';
-            video[x + i].color = terminal->color;
-            video[x + i].protected = 0;
+            ozterm_set_character(terminal, terminal->screen_active->cursor_row, x + i, ' ', 1);
         }
     }
 }
 
 void ozterm_line_delete_characters(Ozterm* terminal, int16_t count)
 {
-    OztermCell *video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
+    OztermCell *cell = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
     int16_t x = terminal->screen_active->cursor_column;
 
     if (x >= terminal->column_count)
@@ -487,22 +526,23 @@ void ozterm_line_delete_characters(Ozterm* terminal, int16_t count)
     if (x + count >= terminal->column_count)
         count = terminal->column_count - x;
 
-    // Shift cells left (skip protected targets)
+    // Shift cells left
     for (int i = x; i < terminal->column_count - count; ++i)
     {
-        if (!video[i].protected)
+        if (ozterm_is_cell_writable(terminal, &cell[i]))
         {
             int src = i + count;
-            // Skip protected sources
-            while (src < terminal->column_count && video[src].protected)
-                src++;
 
             if (src < terminal->column_count)
-                video[i] = video[src];
-            else {
-                video[i].character = ' ';
-                video[i].color = terminal->color;
-                video[i].protected = 0;
+            {
+                cell[i] = cell[src];
+
+                if (terminal->set_character_function)
+                    terminal->set_character_function(terminal, terminal->screen_active->cursor_row, i, &cell[i]);
+            }
+            else
+            {
+                ozterm_set_character(terminal, terminal->screen_active->cursor_row, i, ' ', 1);
             }
         }
     }
@@ -510,19 +550,15 @@ void ozterm_line_delete_characters(Ozterm* terminal, int16_t count)
     // Clear vacated cells at end
     for (int i = terminal->column_count - count; i < terminal->column_count; ++i)
     {
-        if (!video[i].protected)
+        if (ozterm_is_cell_writable(terminal, &cell[i]))
         {
-            video[i].character = ' ';
-            video[i].color = terminal->color;
-            video[i].protected = 0;
+            ozterm_set_character(terminal, terminal->screen_active->cursor_row, i, ' ', 1);
         }
     }
 }
 
 void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
 {
-    OztermCell * video = terminal->screen_active->buffer;
-
     if ('\n' == c)
     {
         if (terminal->screen_active->cursor_row == terminal->scroll_bottom)
@@ -574,20 +610,7 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
             }
         }
 
-        video += (terminal->screen_active->cursor_row * terminal->column_count + terminal->screen_active->cursor_column);
-
-        video->character = c;
-        video->color = terminal->color;
-        video->protected = terminal->screen_active->attr_protected;
-
-        //at this point it is added to buffer already
-
-
-        //visual update
-        if (terminal->set_character_function)
-        {
-            terminal->set_character_function(terminal, terminal->screen_active->cursor_row, terminal->screen_active->cursor_column, c);
-        }
+        ozterm_set_character(terminal, terminal->screen_active->cursor_row, terminal->screen_active->cursor_column, c, 1);
 
         ozterm_move_cursor(terminal, terminal->screen_active->cursor_row, terminal->screen_active->cursor_column + 1);
     }
@@ -734,10 +757,12 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     {
                         for (int x = 0; x < terminal->column_count; ++x)
                         {
-                            terminal->screen_active->buffer[y * terminal->column_count + x].character = 'E';
-                            terminal->screen_active->buffer[y * terminal->column_count + x].color = terminal->color;
+                            ozterm_set_character(terminal, y, x, 'E', 0);
                         }
                     }
+                    if (terminal->refresh_function)
+                        terminal->refresh_function(terminal);
+
                     ozterm_move_cursor(terminal, 0, 0);
                 }
                 parse_state = STATE_NORMAL;
@@ -840,12 +865,7 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                                 int x_start = (y == cy) ? cx : 0;
                                 for (int x = x_start; x < terminal->column_count; ++x)
                                 {
-                                    int index = y * terminal->column_count + x;
-                                    if (!terminal->screen_active->buffer[index].protected)
-                                    {
-                                        terminal->screen_active->buffer[index].character = ' ';
-                                        terminal->screen_active->buffer[index].color = terminal->color;
-                                    }
+                                    ozterm_set_character(terminal, y, x, ' ', 1);
                                 }
                             }
                             break;
@@ -854,13 +874,9 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                             for (int y = 0; y <= cy; ++y)
                             {
                                 int x_end = (y == cy) ? cx + 1 : terminal->column_count;
-                                for (int x = 0; x < x_end; ++x) {
-                                    int index = y * terminal->column_count + x;
-                                    if (!terminal->screen_active->buffer[index].protected)
-                                    {
-                                        terminal->screen_active->buffer[index].character = ' ';
-                                        terminal->screen_active->buffer[index].color = terminal->color;
-                                    }
+                                for (int x = 0; x < x_end; ++x)
+                                {
+                                    ozterm_set_character(terminal, y, x, ' ', 1);
                                 }
                             }
                             break;
@@ -871,12 +887,7 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                             {
                                 for (int x = 0; x < terminal->column_count; ++x)
                                 {
-                                    int index = y * terminal->column_count + x;
-                                    if (!terminal->screen_active->buffer[index].protected)
-                                    {
-                                        terminal->screen_active->buffer[index].character = ' ';
-                                        terminal->screen_active->buffer[index].color = terminal->color;
-                                    }
+                                    ozterm_set_character(terminal, y, x, ' ', 1);
                                 }
                             }
                             break;
@@ -909,47 +920,47 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
 
                     for (int x = x_start; x < x_end; ++x)
                     {
-                        int index = y * terminal->column_count + x;
-                        if (!terminal->screen_active->buffer[index].protected)
-                        {
-                            terminal->screen_active->buffer[index].character = ' ';
-                            terminal->screen_active->buffer[index].color = terminal->color;
-                        }
+                        ozterm_set_character(terminal, y, x, ' ', 1);
                     }
                     break;
                 }
                 case 'm': {
                     handled = 1;  // will reset to 0 only if nothing matches
                     char* p = param_buf;
-                    while (p && *p)
+                    if (p)
                     {
-                        int val = strtol(p, &p, 10);
-
-                        switch (val)
+                        if (*p == '\0')
                         {
-                            case 0:
-                                ozterm_reset_attributes(terminal);
-                                break;
-                            case 1:
-                                //terminal_set_bold(terminal, true);
-                                //printf("Bold\n");
-                                break;
-                            case 8:  // protected
-                                terminal->screen_active->attr_protected = 1;
-                                break;
-                            case 22:
-                                //terminal_set_bold(terminal, false);
-                                break;
-                            case 31:
-                                //ozterm_set_fg_color(terminal, RED);
-                                break;
-
-                            default:
-                                // Optional: printf("Unhandled SGR: %d\n", val);
-                                break;
+                            ozterm_reset_attributes(terminal);
                         }
+                        else
+                        {
+                            while (*p)
+                            {
+                                int code = strtol(p, &p, 10);
 
-                        if (*p == ';') p++;  // skip to next param
+                                if (code == 0)
+                                    ozterm_reset_attributes(terminal);
+                                else if (code >= 30 && code <= 37)
+                                    terminal->screen_active->fg_color = code - 30;
+                                else if (code >= 40 && code <= 47)
+                                    terminal->screen_active->bg_color = code - 40;
+                                else if (code >= 90 && code <= 97)
+                                    terminal->screen_active->fg_color = code - 90 + 8;
+                                else if (code >= 100 && code <= 107)
+                                    terminal->screen_active->bg_color = code - 100 + 8;
+                                else if (code == 7)
+                                    terminal->screen_active->attr_inverse = 1;
+                                else if (code == 27)
+                                    terminal->screen_active->attr_inverse = 0;
+                                else if (code == 39)
+                                    terminal->screen_active->fg_color = terminal->fg_color_default;
+                                else if (code == 49)
+                                    terminal->screen_active->bg_color = terminal->bg_color_default;
+
+                                if (*p == ';') p++;  // skip to next param
+                            }
+                        }
                     }
                     break;
                 }
@@ -973,6 +984,18 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     else if (is_private && strcmp(effective_param, "7") == 0)
                     {
                         //terminal->autowrap_enabled = true;
+                    }
+                    else if (is_private && strcmp(effective_param, "8") == 0)
+                    {
+                        //set auto-repeat: no need to implement
+                    }
+                    else if (is_private && strcmp(effective_param, "1") == 0)
+                    {
+                        terminal->DECCKM = 1;
+                    }
+                    else if (is_private && strcmp(effective_param, "3") == 0)
+                    {
+                        //DECCOLM: Set number of columns to 132 : ignore
                     }
                     else
                     {
@@ -999,6 +1022,18 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     else if (is_private && strcmp(effective_param, "7") == 0)
                     {
                         //terminal->autowrap_enabled = false;
+                    }
+                    else if (is_private && strcmp(effective_param, "8") == 0)
+                    {
+                        //reset auto-repeat: no need to implement
+                    }
+                    else if (is_private && strcmp(effective_param, "1") == 0)
+                    {
+                        terminal->DECCKM = 0;
+                    }
+                    else if (is_private && strcmp(effective_param, "3") == 0)
+                    {
+                        //DECCOLM: Set number of columns to 132 : ignore
                     }
                     else
                     {
@@ -1110,11 +1145,6 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
             seq_len = 0;
             
             break;
-    }
-
-    if (terminal->scroll_offset > 0)
-    {
-        terminal->scroll_offset = 0;
     }
 }
 
@@ -1230,10 +1260,30 @@ void ozterm_send_key(Ozterm* terminal, OztermKeyModifier modifier, uint8_t key)
         // --- Navigation + Editing keys ---
         case OZTERM_KEY_HOME:     size = write_csi_sequence(seq, sizeof(seq), 1, 'H', mod_value); break;
         case OZTERM_KEY_END:      size = write_csi_sequence(seq, sizeof(seq), 1, 'F', mod_value); break;
-        case OZTERM_KEY_UP:       size = write_csi_sequence(seq, sizeof(seq), 1, 'A', mod_value); break;
-        case OZTERM_KEY_DOWN:     size = write_csi_sequence(seq, sizeof(seq), 1, 'B', mod_value); break;
-        case OZTERM_KEY_LEFT:     size = write_csi_sequence(seq, sizeof(seq), 1, 'D', mod_value); break;
-        case OZTERM_KEY_RIGHT:    size = write_csi_sequence(seq, sizeof(seq), 1, 'C', mod_value); break;
+        case OZTERM_KEY_UP:
+            if (terminal->DECCKM)
+                size = snprintf((char*)seq, sizeof(seq), "\033OA");
+            else
+                size = write_csi_sequence(seq, sizeof(seq), 1, 'A', mod_value);
+            break;
+        case OZTERM_KEY_DOWN:
+            if (terminal->DECCKM)
+                size = snprintf((char*)seq, sizeof(seq), "\033OB");
+            else
+                size = write_csi_sequence(seq, sizeof(seq), 1, 'B', mod_value);
+            break;
+        case OZTERM_KEY_LEFT:
+            if (terminal->DECCKM)
+                size = snprintf((char*)seq, sizeof(seq), "\033OD");
+            else
+                size = write_csi_sequence(seq, sizeof(seq), 1, 'D', mod_value);
+            break;
+        case OZTERM_KEY_RIGHT:
+            if (terminal->DECCKM)
+                size = snprintf((char*)seq, sizeof(seq), "\033OC");
+            else
+                size = write_csi_sequence(seq, sizeof(seq), 1, 'C', mod_value);
+            break;
         case OZTERM_KEY_PAGEUP:   size = write_csi_sequence(seq, sizeof(seq), 5, '~', mod_value); break;
         case OZTERM_KEY_PAGEDOWN: size = write_csi_sequence(seq, sizeof(seq), 6, '~', mod_value); break;
         case OZTERM_KEY_INSERT:   size = write_csi_sequence(seq, sizeof(seq), 2, '~', mod_value); break;

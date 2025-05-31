@@ -32,25 +32,27 @@
 
 typedef struct Ozterm Ozterm;
 
-typedef void (*OztermRefresh)(Ozterm* terminal);
-typedef void (*OztermSetCharacter)(Ozterm* terminal, int16_t row, int16_t column, uint8_t character);
-typedef void (*OztermMoveCursor)(Ozterm* terminal, int16_t old_row, int16_t old_column, int16_t row, int16_t column);
-typedef void (*OztermWriteToMaster)(Ozterm* terminal, const uint8_t* data, int32_t size);
-
-
 typedef struct OztermCell
 {
     uint8_t character;
-    uint8_t color;
-    uint8_t protected;
+    uint8_t fg_color;
+    uint8_t bg_color;
 } OztermCell;
+
+typedef void (*OztermRefresh)(Ozterm* terminal);
+typedef void (*OztermSetCharacter)(Ozterm* terminal, int16_t row, int16_t column, OztermCell* cell);
+typedef void (*OztermMoveCursor)(Ozterm* terminal, int16_t old_row, int16_t old_column, int16_t row, int16_t column);
+typedef void (*OztermWriteToMaster)(Ozterm* terminal, const uint8_t* data, int32_t size);
+
 
 typedef struct OztermScreen
 {
     OztermCell * buffer;
     int16_t cursor_row;
     int16_t cursor_column;
-    uint8_t attr_protected;
+    uint8_t fg_color;
+    uint8_t bg_color;
+    uint8_t attr_inverse;
 } OztermScreen;
 
 #define SCROLLBACK_LINES 1024
@@ -67,7 +69,9 @@ typedef struct Ozterm
     int16_t column_count;
     int16_t scroll_top;
     int16_t scroll_bottom;
-    uint8_t color;
+    uint8_t fg_color_default;
+    uint8_t bg_color_default;
+    uint8_t DECCKM;
     void* custom_data;
     OztermCell** scrollback;     // Array of pointers to lines
     int16_t scrollback_head;         // Next line to write
@@ -127,6 +131,7 @@ OztermCell* ozterm_get_row(Ozterm* terminal, int16_t row);
 //scroll_offset is based from last line
 void ozterm_scroll(Ozterm* terminal, int16_t scroll_offset);
 int16_t ozterm_get_scroll(Ozterm* terminal);
+int16_t ozterm_get_scroll_count(Ozterm* terminal);
 
 //this will cause a OztermWriteToMaster
 void ozterm_send_key(Ozterm* terminal, OztermKeyModifier modifier, uint8_t character);
