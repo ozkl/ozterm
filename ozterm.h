@@ -37,12 +37,12 @@ typedef void (*OztermSetCharacter)(Ozterm* terminal, int16_t row, int16_t column
 typedef void (*OztermMoveCursor)(Ozterm* terminal, int16_t old_row, int16_t old_column, int16_t row, int16_t column);
 typedef void (*OztermWriteToMaster)(Ozterm* terminal, const uint8_t* data, int32_t size);
 
-//Do not change/add to this
-//It is also compatible to VGA text mode (must be 16 bits)
+
 typedef struct OztermCell
 {
     uint8_t character;
     uint8_t color;
+    uint8_t protected;
 } OztermCell;
 
 typedef struct OztermScreen
@@ -50,7 +50,10 @@ typedef struct OztermScreen
     OztermCell * buffer;
     int16_t cursor_row;
     int16_t cursor_column;
+    uint8_t attr_protected;
 } OztermScreen;
+
+#define SCROLLBACK_LINES 1024
 
 typedef struct Ozterm
 {
@@ -65,6 +68,11 @@ typedef struct Ozterm
     int16_t scroll_top;
     int16_t scroll_bottom;
     uint8_t color;
+    void* custom_data;
+    OztermCell** scrollback;     // Array of pointers to lines
+    int16_t scrollback_head;         // Next line to write
+    int16_t scrollback_count;        // Total filled lines
+    int16_t scroll_offset;           // Current scroll view offset
     OztermRefresh refresh_function;
     OztermSetCharacter set_character_function;
     OztermMoveCursor move_cursor_function;
@@ -113,6 +121,12 @@ typedef enum OztermKeyModifier
 
 Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count);
 void ozterm_destroy(Ozterm* terminal);
+OztermCell* ozterm_get_row(Ozterm* terminal, int16_t row);
+
+//this is scroll back mechanism, not related to the scrolling inside page or region
+//scroll_offset is based from last line
+void ozterm_scroll(Ozterm* terminal, int16_t scroll_offset);
+int16_t ozterm_get_scroll(Ozterm* terminal);
 
 //this will cause a OztermWriteToMaster
 void ozterm_send_key(Ozterm* terminal, OztermKeyModifier modifier, uint8_t character);

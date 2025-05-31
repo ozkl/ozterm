@@ -39,8 +39,8 @@
 
 //Internal API
 uint8_t ozterm_get_character(Ozterm * terminal, int16_t row, int16_t column);
+void ozterm_reset_attributes(Ozterm* terminal);
 void ozterm_clear(Ozterm* terminal);
-void ozterm_clear_line_right(Ozterm* terminal);
 void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count);
 void ozterm_line_delete_characters(Ozterm* terminal, int16_t count);
 void ozterm_put_character(Ozterm* terminal, uint8_t c);
@@ -50,19 +50,33 @@ void ozterm_move_cursor_diff(Ozterm* terminal, int16_t row, int16_t column);
 void ozterm_scroll_up_region(Ozterm* terminal, int lines);
 void ozterm_scroll_down_region(Ozterm* terminal, int lines);
 
+void * malloc_impl(size_t size)
+{
+    return malloc(size);
+}
+
+void free_impl(void * address)
+{
+    free(address);
+}
+
 
 Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
 {
-    Ozterm* terminal = malloc(sizeof(Ozterm));
+    Ozterm* terminal = malloc_impl(sizeof(Ozterm));
     memset((uint8_t*)terminal, 0, sizeof(Ozterm));
 
-    terminal->screen_main = malloc(sizeof(OztermScreen));
-    terminal->screen_main->buffer = malloc(row_count * column_count * sizeof(OztermCell));
+    terminal->screen_main = malloc_impl(sizeof(OztermScreen));
+    memset((uint8_t*)terminal->screen_main, 0, sizeof(OztermScreen));
+    terminal->screen_main->buffer = malloc_impl(row_count * column_count * sizeof(OztermCell));
+    memset((uint8_t*)terminal->screen_main->buffer, 0, row_count * column_count * sizeof(OztermCell));
     terminal->screen_main->cursor_column = 0;
     terminal->screen_main->cursor_row = 0;
 
-    terminal->screen_alternative = malloc(sizeof(OztermScreen));
-    terminal->screen_alternative->buffer = malloc(row_count * column_count * sizeof(OztermCell));
+    terminal->screen_alternative = malloc_impl(sizeof(OztermScreen));
+    memset((uint8_t*)terminal->screen_alternative, 0, sizeof(OztermScreen));
+    terminal->screen_alternative->buffer = malloc_impl(row_count * column_count * sizeof(OztermCell));
+    memset((uint8_t*)terminal->screen_alternative->buffer, 0, row_count * column_count * sizeof(OztermCell));
     terminal->screen_alternative->cursor_column = 0;
     terminal->screen_alternative->cursor_row = 0;
 
@@ -76,6 +90,17 @@ Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
     terminal->scroll_bottom = terminal->row_count - 1;
     terminal->color = 0x0A;
 
+    terminal->scrollback = malloc_impl(sizeof(OztermCell*) * SCROLLBACK_LINES);
+    for (int i = 0; i < SCROLLBACK_LINES; ++i)
+    {
+        terminal->scrollback[i] = malloc_impl(sizeof(OztermCell) * terminal->column_count);
+        memset(terminal->scrollback[i], 0, sizeof(OztermCell) * terminal->column_count);
+    }
+    terminal->scrollback_head = 0;
+    terminal->scrollback_count = 0;
+    terminal->scroll_offset = 0;
+
+
     ozterm_clear(terminal);
 
     return terminal;
@@ -83,11 +108,73 @@ Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
 
 void ozterm_destroy(Ozterm* terminal)
 {
-    free(terminal->screen_main->buffer);
-    free(terminal->screen_main);
-    free(terminal->screen_alternative->buffer);
-    free(terminal->screen_alternative);
-    free(terminal);
+    for (int i = 0; i < SCROLLBACK_LINES; ++i)
+    {
+        free_impl(terminal->scrollback[i]);
+    }
+    free_impl(terminal->scrollback);
+
+    free_impl(terminal->screen_main->buffer);
+    free_impl(terminal->screen_main);
+    free_impl(terminal->screen_alternative->buffer);
+    free_impl(terminal->screen_alternative);
+    free_impl(terminal);
+}
+
+OztermCell* ozterm_get_row(Ozterm* terminal, int16_t row)
+{
+    OztermCell* row_buffer = NULL;
+
+    // scrollback mode
+    if (terminal->scroll_offset > 0)
+    {
+        int scroll_index = terminal->scrollback_count - terminal->scroll_offset + row;
+
+        if (scroll_index < terminal->scrollback_count)
+        {
+            int ring_index = (terminal->scrollback_head - terminal->scrollback_count + scroll_index + SCROLLBACK_LINES) % SCROLLBACK_LINES;
+            row_buffer = terminal->scrollback[ring_index];
+        }
+        else
+        {
+            int buffer_y = row - terminal->scroll_offset;
+            row_buffer = terminal->screen_active->buffer + (buffer_y * terminal->column_count);
+        }
+    }
+    else
+    {
+        row_buffer = terminal->screen_active->buffer + (row * terminal->column_count);
+    }
+    
+    return row_buffer;
+}
+
+void ozterm_reset_attributes(Ozterm* terminal)
+{
+    terminal->screen_active->attr_protected = 0;
+}
+
+void ozterm_scroll(Ozterm* terminal, int16_t scroll_offset)
+{
+    if (scroll_offset > terminal->scrollback_count)
+    {
+        scroll_offset = terminal->scrollback_count;
+    }
+
+    if (scroll_offset < 0)
+    {
+        scroll_offset = 0;
+    }
+
+    terminal->scroll_offset = scroll_offset;
+
+    if (terminal->refresh_function)
+        terminal->refresh_function(terminal);
+}
+
+int16_t ozterm_get_scroll(Ozterm* terminal)
+{
+    return terminal->scroll_offset;
 }
 
 static void write_to_master(Ozterm* terminal, const char* data, int32_t size)
@@ -131,6 +218,22 @@ uint8_t ozterm_get_character(Ozterm * terminal, int16_t row, int16_t column)
 void ozterm_scroll_up_region(Ozterm* terminal, int lines)
 {
     if (lines <= 0) lines = 1;
+
+    //
+    // Save the top-most line to scrollback
+    for (int l = 0; l < lines; ++l)
+    {
+        int top = terminal->scroll_top + l;
+        memcpy(
+            terminal->scrollback[terminal->scrollback_head],
+            &terminal->screen_active->buffer[top * terminal->column_count],
+            sizeof(OztermCell) * terminal->column_count
+        );
+        terminal->scrollback_head = (terminal->scrollback_head + 1) % SCROLLBACK_LINES;
+        if (terminal->scrollback_count < SCROLLBACK_LINES)
+            terminal->scrollback_count++;
+    }
+    //
 
     int top = terminal->scroll_top;
     int bottom = terminal->scroll_bottom;
@@ -209,20 +312,11 @@ void ozterm_clear(Ozterm* terminal)
     for (i = 0; i < terminal->row_count * terminal->column_count; ++i)
     {
         video[i].character = ' ';
+        video[i].protected = 0;
         video[i].color = terminal->color;
     }
 
     ozterm_move_cursor(terminal, 0, 0);
-}
-
-void ozterm_clear_line_right(Ozterm* terminal)
-{
-    for (int x = terminal->screen_active->cursor_column; x < terminal->column_count; ++x)
-    {
-        OztermCell * video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count + x);
-        video->character = ' ';
-        video->color = terminal->color;
-    }
 }
 
 void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count)
@@ -335,6 +429,7 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
 
         video->character = c;
         video->color = terminal->color;
+        video->protected = terminal->screen_active->attr_protected;
 
         //at this point it is added to buffer already
 
@@ -352,7 +447,7 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
 
 void ozterm_put_character(Ozterm* terminal, uint8_t c)
 {
-    static enum ParseState { STATE_NORMAL, STATE_ESC, STATE_CSI, STATE_OSC, STATE_G0, STATE_G1 } parse_state = STATE_NORMAL;
+    static enum ParseState { STATE_NORMAL, STATE_ESC, STATE_CSI, STATE_OSC, STATE_G0, STATE_G1, STATE_HASH } parse_state = STATE_NORMAL;
     static char param_buf[32];
     static int param_len = 0;
     static char seq_buf[64];
@@ -403,6 +498,10 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
             else if (c == ')')
             {
                 parse_state = STATE_G1;
+            }
+            else if (c == '#')
+            {
+                parse_state = STATE_HASH;
             }
             else if (c == '7')
             {
@@ -478,6 +577,22 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
             case STATE_G1:
                 // Valid values: 'B' (ASCII), '0' (line drawing), etc.
                 parse_state = STATE_NORMAL;
+                break;
+            case STATE_HASH:
+                if (c == '8') {
+                    // Fill entire screen with 'E'
+                    for (int y = 0; y < terminal->row_count; ++y)
+                    {
+                        for (int x = 0; x < terminal->column_count; ++x)
+                        {
+                            terminal->screen_active->buffer[y * terminal->column_count + x].character = 'E';
+                            terminal->screen_active->buffer[y * terminal->column_count + x].color = terminal->color;
+                        }
+                    }
+                    ozterm_move_cursor(terminal, 0, 0);
+                }
+                parse_state = STATE_NORMAL;
+
                 break;
 
         case STATE_CSI:
@@ -560,13 +675,100 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                         handled = 0;
                     }
                     break;
-                case 'J':
-                    if (strcmp(effective_param, "2") == 0)
-                        ozterm_clear(terminal);
+                case 'J': {
+                    int mode = 0;
+                    if (effective_param[0])
+                        mode = atoi(effective_param);
+
+                    int cy = terminal->screen_active->cursor_row;
+                    int cx = terminal->screen_active->cursor_column;
+
+                    switch (mode)
+                    {
+                        case 0:  // From cursor to end of screen
+                            for (int y = cy; y < terminal->row_count; ++y)
+                            {
+                                int x_start = (y == cy) ? cx : 0;
+                                for (int x = x_start; x < terminal->column_count; ++x)
+                                {
+                                    int index = y * terminal->column_count + x;
+                                    if (!terminal->screen_active->buffer[index].protected)
+                                    {
+                                        terminal->screen_active->buffer[index].character = ' ';
+                                        terminal->screen_active->buffer[index].color = terminal->color;
+                                    }
+                                }
+                            }
+                            break;
+
+                        case 1:  // From top to cursor
+                            for (int y = 0; y <= cy; ++y)
+                            {
+                                int x_end = (y == cy) ? cx + 1 : terminal->column_count;
+                                for (int x = 0; x < x_end; ++x) {
+                                    int index = y * terminal->column_count + x;
+                                    if (!terminal->screen_active->buffer[index].protected)
+                                    {
+                                        terminal->screen_active->buffer[index].character = ' ';
+                                        terminal->screen_active->buffer[index].color = terminal->color;
+                                    }
+                                }
+                            }
+                            break;
+
+                        case 2:  // Entire screen
+                        default:
+                            for (int y = 0; y < terminal->row_count; ++y)
+                            {
+                                for (int x = 0; x < terminal->column_count; ++x)
+                                {
+                                    int index = y * terminal->column_count + x;
+                                    if (!terminal->screen_active->buffer[index].protected)
+                                    {
+                                        terminal->screen_active->buffer[index].character = ' ';
+                                        terminal->screen_active->buffer[index].color = terminal->color;
+                                    }
+                                }
+                            }
+                            break;
+                    }
+
                     break;
-                case 'K':
-                    ozterm_clear_line_right(terminal);
+                }
+                case 'K': {
+                    int y = terminal->screen_active->cursor_row;
+                    int x_start = 0, x_end = terminal->column_count;
+
+                    // Default to 0 (erase right)
+                    int mode = 0;
+                    if (effective_param[0])
+                        mode = atoi(effective_param);
+
+                    switch (mode)
+                    {
+                        case 0:  // Erase to right
+                            x_start = terminal->screen_active->cursor_column;
+                            break;
+                        case 1:  // Erase to left
+                            x_end = terminal->screen_active->cursor_column + 1;
+                            break;
+                        case 2:  // Erase entire line
+                            break;
+                        default:
+                            break;
+                    }
+
+                    for (int x = x_start; x < x_end; ++x)
+                    {
+                        int index = y * terminal->column_count + x;
+                        if (!terminal->screen_active->buffer[index].protected)
+                        {
+                            terminal->screen_active->buffer[index].character = ' ';
+                            terminal->screen_active->buffer[index].color = terminal->color;
+                        }
+                    }
                     break;
+                }
                 case 'm': {
                     handled = 1;  // will reset to 0 only if nothing matches
                     char* p = param_buf;
@@ -577,11 +779,14 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                         switch (val)
                         {
                             case 0:
-                                //terminal_reset_attrs(terminal);
+                                ozterm_reset_attributes(terminal);
                                 break;
                             case 1:
                                 //terminal_set_bold(terminal, true);
                                 //printf("Bold\n");
+                                break;
+                            case 8:  // protected
+                                terminal->screen_active->attr_protected = 1;
                                 break;
                             case 22:
                                 //terminal_set_bold(terminal, false);
@@ -589,6 +794,7 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                             case 31:
                                 //ozterm_set_fg_color(terminal, RED);
                                 break;
+
                             default:
                                 // Optional: printf("Unhandled SGR: %d\n", val);
                                 break;
@@ -615,6 +821,10 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     {
                         // enable cursor blink
                     }
+                    else if (is_private && strcmp(effective_param, "7") == 0)
+                    {
+                        //terminal->autowrap_enabled = true;
+                    }
                     else
                     {
                         handled = 0;
@@ -636,6 +846,10 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     else if (is_private && strcmp(effective_param, "12") == 0)
                     {
                         // disable cursor blink
+                    }
+                    else if (is_private && strcmp(effective_param, "7") == 0)
+                    {
+                        //terminal->autowrap_enabled = false;
                     }
                     else
                     {
@@ -671,7 +885,15 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                     }
                     else
                     {
-                        handled = 0;
+                        if (strcmp(param_buf, "0") == 0) //CSI [0c (DA request)
+                        {
+                            const char* reply = "\033[?1;0c";
+                            write_to_master(terminal, reply, strlen(reply));
+                        }
+                        else
+                        {
+                            handled = 0;
+                        }
                     }
                     break;
                 case '@':
@@ -798,6 +1020,11 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
             seq_len = 0;
             
             break;
+    }
+
+    if (terminal->scroll_offset > 0)
+    {
+        terminal->scroll_offset = 0;
     }
 }
 
