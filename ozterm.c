@@ -47,8 +47,11 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c);
 void ozterm_put_text(Ozterm* terminal, const uint8_t* text, int32_t size);
 void ozterm_move_cursor(Ozterm* terminal, int16_t row, int16_t column);
 void ozterm_move_cursor_diff(Ozterm* terminal, int16_t row, int16_t column);
+void ozterm_scroll_up(Ozterm* terminal, int lines);
 void ozterm_scroll_up_region(Ozterm* terminal, int lines);
 void ozterm_scroll_down_region(Ozterm* terminal, int lines);
+static void ozterm_insert_lines(Ozterm* terminal, int from_row, int count);
+static void ozterm_delete_lines(Ozterm* terminal, int from_row, int count);
 
 void * malloc_impl(size_t size)
 {
@@ -215,12 +218,10 @@ uint8_t ozterm_get_character(Ozterm * terminal, int16_t row, int16_t column)
     return video->character;
 }
 
-void ozterm_scroll_up_region(Ozterm* terminal, int lines)
+void ozterm_scroll_up(Ozterm* terminal, int lines)
 {
     if (lines <= 0) lines = 1;
 
-    //
-    // Save the top-most line to scrollback
     for (int l = 0; l < lines; ++l)
     {
         int top = terminal->scroll_top + l;
@@ -233,25 +234,38 @@ void ozterm_scroll_up_region(Ozterm* terminal, int lines)
         if (terminal->scrollback_count < SCROLLBACK_LINES)
             terminal->scrollback_count++;
     }
-    //
+
+    ozterm_scroll_up_region(terminal, lines);
+}
+
+void ozterm_scroll_up_region(Ozterm* terminal, int lines)
+{
+    if (lines <= 0) lines = 1;
 
     int top = terminal->scroll_top;
     int bottom = terminal->scroll_bottom;
     int columns = terminal->column_count;
+    
     OztermCell* buf = terminal->screen_active->buffer;
 
     if (lines > bottom - top + 1)
         lines = bottom - top + 1;
 
-    // Scroll UP: move lines from top+lines → top
-    for (int row = top; row <= bottom - lines; ++row)
+    // Scroll UP: move lines up
+    for (int y = top; y <= bottom - lines; ++y)
     {
-        memcpy(buf + row * columns,
-               buf + (row + lines) * columns,
-               sizeof(OztermCell) * columns);
+        for (int x = 0; x < columns; ++x) {
+            int from = (y + lines) * columns + x;
+            int to = y * columns + x;
+
+            if (!buf[to].protected)
+            {
+                buf[to] = buf[from];
+            }
+        }
     }
 
-    // Clear bottom lines
+    // Clear newly exposed lines at the bottom
     for (int row = bottom - lines + 1; row <= bottom; ++row)
     {
         for (int col = 0; col < columns; ++col)
@@ -259,13 +273,13 @@ void ozterm_scroll_up_region(Ozterm* terminal, int lines)
             int idx = row * columns + col;
             buf[idx].character = ' ';
             buf[idx].color = terminal->color;
+            buf[idx].protected = 0;
         }
     }
 
     if (terminal->refresh_function)
         terminal->refresh_function(terminal);
 }
-
 
 void ozterm_scroll_down_region(Ozterm* terminal, int lines)
 {
@@ -285,8 +299,18 @@ void ozterm_scroll_down_region(Ozterm* terminal, int lines)
     // Scroll DOWN: move lines from bottom up to top
     for (int row = bottom; row >= top + lines; --row)
     {
-        memcpy(buf + row * columns, buf + (row - lines) * columns, sizeof(OztermCell) * columns);
+        for (int col = 0; col < columns; ++col)
+        {
+            int to = row * columns + col;
+            int from = (row - lines) * columns + col;
+
+            if (!buf[to].protected)
+            {
+                buf[to] = buf[from];
+            }
+        }
     }
+
 
     // Clear top N lines
     for (int row = top; row < top + lines; ++row)
@@ -296,6 +320,95 @@ void ozterm_scroll_down_region(Ozterm* terminal, int lines)
             OztermCell* cell = &buf[row * columns + col];
             cell->character = ' ';
             cell->color = terminal->color;
+            cell->protected = 0;
+        }
+    }
+
+    if (terminal->refresh_function)
+        terminal->refresh_function(terminal);
+}
+
+static void ozterm_insert_lines(Ozterm* terminal, int from_row, int count)
+{
+    if (count <= 0) return;
+
+    int top = from_row;
+    int bottom = terminal->scroll_bottom;
+    int columns = terminal->column_count;
+
+    if (top < terminal->scroll_top || top > bottom) return;
+
+    if (count > bottom - top + 1)
+        count = bottom - top + 1;
+
+    OztermCell* buf = terminal->screen_active->buffer;
+
+    // Shift lines down
+    for (int row = bottom; row >= top + count; --row)
+    {
+        for (int col = 0; col < columns; ++col)
+        {
+            int to = row * columns + col;
+            int from = (row - count) * columns + col;
+
+            if (!buf[to].protected)
+                buf[to] = buf[from];
+        }
+    }
+
+    // Clear inserted lines
+    for (int row = top; row < top + count; ++row)
+    {
+        for (int col = 0; col < columns; ++col)
+        {
+            int idx = row * columns + col;
+            buf[idx].character = ' ';
+            buf[idx].color = terminal->color;
+            buf[idx].protected = 0;
+        }
+    }
+
+    if (terminal->refresh_function)
+        terminal->refresh_function(terminal);
+}
+
+static void ozterm_delete_lines(Ozterm* terminal, int from_row, int count)
+{
+    if (count <= 0) return;
+
+    int top = from_row;
+    int bottom = terminal->scroll_bottom;
+    int columns = terminal->column_count;
+
+    if (top < terminal->scroll_top || top > bottom) return;
+
+    if (count > bottom - top + 1)
+        count = bottom - top + 1;
+
+    OztermCell* buf = terminal->screen_active->buffer;
+
+    // Shift lines up
+    for (int row = top; row <= bottom - count; ++row)
+    {
+        for (int col = 0; col < columns; ++col)
+        {
+            int to = row * columns + col;
+            int from = (row + count) * columns + col;
+
+            if (!buf[to].protected)
+                buf[to] = buf[from];
+        }
+    }
+
+    // Clear bottom lines
+    for (int row = bottom - count + 1; row <= bottom; ++row)
+    {
+        for (int col = 0; col < columns; ++col)
+        {
+            int idx = row * columns + col;
+            buf[idx].character = ' ';
+            buf[idx].color = terminal->color;
+            buf[idx].protected = 0;
         }
     }
 
@@ -321,51 +434,87 @@ void ozterm_clear(Ozterm* terminal)
 
 void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count)
 {
-    OztermCell * video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
+    OztermCell *video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
     int16_t x = terminal->screen_active->cursor_column;
 
-    if (x < terminal->column_count)
-    {
-        if (x + count >= terminal->column_count)
-            count = terminal->column_count - x;
-        
-            // Shift everything to the right
-        for (int i = terminal->column_count - 1; i >= x + count; --i)
-        {
-            video[i] = video[i - count];
-        }
+    if (x >= terminal->column_count)
+        return;
 
-        // Fill inserted space
-        for (int i = 0; i < count; ++i)
+    if (x + count >= terminal->column_count)
+        count = terminal->column_count - x;
+
+    // Shift cells to the right (skip protected targets)
+    for (int i = terminal->column_count - 1; i >= x + count; --i)
+    {
+        if (!video[i].protected)
+        {
+            // Find the source to copy from
+            int src = i - count;
+            // Skip protected sources
+            while (src >= x && video[src].protected)
+                src--;
+
+            if (src >= x)
+                video[i] = video[src];
+            else {
+                video[i].character = ' ';
+                video[i].color = terminal->color;
+                video[i].protected = 0;
+            }
+        }
+    }
+
+    // Fill inserted area
+    for (int i = 0; i < count; ++i)
+    {
+        if (!video[x + i].protected)
         {
             video[x + i].character = ' ';
             video[x + i].color = terminal->color;
+            video[x + i].protected = 0;
         }
     }
 }
 
 void ozterm_line_delete_characters(Ozterm* terminal, int16_t count)
 {
-    OztermCell * video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
+    OztermCell *video = terminal->screen_active->buffer + (terminal->screen_active->cursor_row * terminal->column_count);
     int16_t x = terminal->screen_active->cursor_column;
 
-    // Cap delete range to what's left in line
-    if (x < terminal->column_count)
+    if (x >= terminal->column_count)
+        return;
+
+    if (x + count >= terminal->column_count)
+        count = terminal->column_count - x;
+
+    // Shift cells left (skip protected targets)
+    for (int i = x; i < terminal->column_count - count; ++i)
     {
-        if (x + count >= terminal->column_count)
-            count = terminal->column_count - x;
-
-        // Shift everything to the left
-        for (int16_t i = x; i < terminal->column_count - count; ++i)
+        if (!video[i].protected)
         {
-            video[i] = video[i + count];
+            int src = i + count;
+            // Skip protected sources
+            while (src < terminal->column_count && video[src].protected)
+                src++;
+
+            if (src < terminal->column_count)
+                video[i] = video[src];
+            else {
+                video[i].character = ' ';
+                video[i].color = terminal->color;
+                video[i].protected = 0;
+            }
         }
+    }
 
-        // Fill space
-        for (int16_t i = terminal->column_count - count; i < terminal->column_count; ++i)
+    // Clear vacated cells at end
+    for (int i = terminal->column_count - count; i < terminal->column_count; ++i)
+    {
+        if (!video[i].protected)
         {
-            video[x + i].character = ' ';
-            video[x + i].color = terminal->color;
+            video[i].character = ' ';
+            video[i].color = terminal->color;
+            video[i].protected = 0;
         }
     }
 }
@@ -379,7 +528,7 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
         if (terminal->screen_active->cursor_row == terminal->scroll_bottom)
         {
             // We're at bottom of scroll region — scroll up
-            ozterm_scroll_up_region(terminal, 1);
+            ozterm_scroll_up(terminal, 1);
             // Cursor stays on the same row, column unchanged
         }
         else
@@ -417,7 +566,7 @@ void ozterm_put_character_and_cursor(Ozterm* terminal, uint8_t c)
 
             if (terminal->screen_active->cursor_row == terminal->scroll_bottom)
             {
-                ozterm_scroll_up_region(terminal, 1);
+                ozterm_scroll_up(terminal, 1);
             }
             else
             {
@@ -914,92 +1063,33 @@ void ozterm_put_character(Ozterm* terminal, uint8_t c)
                         terminal->scroll_bottom = terminal->row_count - 1;
                     }
                     break;
-                    case 'M':
+                case 'M':
                     {
-                    int y = terminal->screen_active->cursor_row;
-                    if (y < terminal->scroll_top || y > terminal->scroll_bottom)
+                        int y = terminal->screen_active->cursor_row;
+                        int count = (p1 > 0 ? p1 : 1);
+                        ozterm_delete_lines(terminal, y, count);
                         break;
-
-                    OztermCell* buf = terminal->screen_active->buffer;
-                    int lines_to_move = terminal->scroll_bottom - y;
-                    for (int i = 0; i < lines_to_move; ++i)
-                    {
-                        memcpy(buf + (y + i) * terminal->column_count,
-                            buf + (y + i + 1) * terminal->column_count,
-                            sizeof(OztermCell) * terminal->column_count);
                     }
-
-                    // Clear the last line
-                    int last = terminal->scroll_bottom;
-                    for (int j = 0; j < terminal->column_count; ++j)
-                    {
-                        buf[last * terminal->column_count + j].character = ' ';
-                        buf[last * terminal->column_count + j].color = terminal->color;
-                    }
-                    break;
-                }
 
                 case 'L':
-                {
-                    int y = terminal->screen_active->cursor_row;
-                    int count = (p1 > 0 ? p1 : 1);
-                    if (y < terminal->scroll_top || y > terminal->scroll_bottom) break;
-                    if (y + count > terminal->scroll_bottom + 1)
-                        count = terminal->scroll_bottom - y + 1;
-                    OztermCell* buf = terminal->screen_active->buffer;
-                    for (int i = terminal->scroll_bottom; i >= y + count; --i)
                     {
-                        memcpy(buf + i * terminal->column_count, buf + (i - count) * terminal->column_count, sizeof(OztermCell) * terminal->column_count);
+                        int y = terminal->screen_active->cursor_row;
+                        int count = (p1 > 0 ? p1 : 1);
+                        ozterm_insert_lines(terminal, y, count);
+                        break;
                     }
-                    for (int i = y; i < y + count; ++i)
-                    {
-                        for (int j = 0; j < terminal->column_count; ++j)
-                        {
-                            int index = i * terminal->column_count + j;
-                            buf[index].character = ' ';
-                            buf[index].color = terminal->color;
-                        }
-                    }
-                    break;
-                }
                 case 'S':
-                {
-                    int count = (p1 > 0 ? p1 : 1);
-                    OztermCell* buf = terminal->screen_active->buffer;
-                    for (int i = terminal->scroll_top; i <= terminal->scroll_bottom - count; ++i)
                     {
-                        memcpy(buf + i * terminal->column_count, buf + (i + count) * terminal->column_count, sizeof(OztermCell) * terminal->column_count);
+                        int count = (p1 > 0) ? p1 : 1;
+                        ozterm_scroll_up_region(terminal, count);
+                        break;
                     }
-                    for (int i = terminal->scroll_bottom - count + 1; i <= terminal->scroll_bottom; ++i)
-                    {
-                        for (int j = 0; j < terminal->column_count; ++j)
-                        {
-                            int index = i * terminal->column_count + j;
-                            buf[index].character = ' ';
-                            buf[index].color = terminal->color;
-                        }
-                    }
-                    break;
-                }
                 case 'T':
-                {
-                    int count = (p1 > 0 ? p1 : 1);
-                    OztermCell* buf = terminal->screen_active->buffer;
-                    for (int i = terminal->scroll_bottom; i >= terminal->scroll_top + count; --i)
                     {
-                        memcpy(buf + i * terminal->column_count, buf + (i - count) * terminal->column_count, sizeof(OztermCell) * terminal->column_count);
+                        int count = (p1 > 0) ? p1 : 1;
+                        ozterm_scroll_down_region(terminal, count);
+                        break;
                     }
-                    for (int i = terminal->scroll_top; i < terminal->scroll_top + count; ++i)
-                    {
-                        for (int j = 0; j < terminal->column_count; ++j)
-                        {
-                            int index = i * terminal->column_count + j;
-                            buf[index].character = ' ';
-                            buf[index].color = terminal->color;
-                        }
-                    }
-                    break;
-                }
                 default:
                     handled = 0;
                     break;
