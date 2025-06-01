@@ -87,6 +87,7 @@ typedef enum OztermKeyModifier
 
 Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count);
 void ozterm_destroy(Ozterm* terminal);
+void ozterm_clear_full(Ozterm* terminal);
 void ozterm_set_write_to_master_callback(Ozterm* terminal, OztermWriteToMaster function);
 void ozterm_set_render_callbacks(Ozterm* terminal, OztermRefresh refresh_func, OztermSetCharacter character_func, OztermMoveCursor cursor_func);
 void ozterm_set_custom_data(Ozterm* terminal, void* custom_data);
@@ -98,6 +99,7 @@ int16_t ozterm_get_cursor_column(Ozterm* terminal);
 OztermCell* ozterm_get_row_data(Ozterm* terminal, int16_t row);
 void ozterm_set_default_color(Ozterm* terminal, uint8_t fg, uint8_t bg);
 void ozterm_get_default_color(Ozterm* terminal, uint8_t* fg, uint8_t* bg);
+void ozterm_put_text(Ozterm* terminal, const uint8_t* text, int32_t size);
 
 //this is scroll back mechanism, not related to the scrolling inside page or region
 //scroll_offset is based from last line

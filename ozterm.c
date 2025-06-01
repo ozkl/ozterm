@@ -83,7 +83,6 @@ static void ozterm_clear(Ozterm* terminal);
 static void ozterm_line_insert_characters(Ozterm* terminal, uint8_t c, int16_t count);
 static void ozterm_line_delete_characters(Ozterm* terminal, int16_t count);
 static void ozterm_put_character(Ozterm* terminal, uint8_t c);
-static void ozterm_put_text(Ozterm* terminal, const uint8_t* text, int32_t size);
 static void ozterm_move_cursor(Ozterm* terminal, int16_t row, int16_t column);
 static void ozterm_move_cursor_diff(Ozterm* terminal, int16_t row, int16_t column);
 static void ozterm_scroll_up(Ozterm* terminal, int lines);
@@ -91,6 +90,8 @@ static void ozterm_scroll_up_region(Ozterm* terminal, int lines);
 static void ozterm_scroll_down_region(Ozterm* terminal, int lines);
 static void ozterm_insert_lines(Ozterm* terminal, int from_row, int count);
 static void ozterm_delete_lines(Ozterm* terminal, int from_row, int count);
+static void ozterm_switch_to_alt_screen(Ozterm* terminal);
+static void ozterm_restore_main_screen(Ozterm* terminal);
 
 static void * malloc_impl(size_t size)
 {
@@ -164,6 +165,15 @@ void ozterm_destroy(Ozterm* terminal)
     free_impl(terminal->screen_alternative->buffer);
     free_impl(terminal->screen_alternative);
     free_impl(terminal);
+}
+
+void ozterm_clear_full(Ozterm* terminal)
+{
+    ozterm_clear(terminal);
+
+    ozterm_switch_to_alt_screen(terminal);
+
+    ozterm_restore_main_screen(terminal);
 }
 
 void ozterm_set_write_to_master_callback(Ozterm* terminal, OztermWriteToMaster function)
@@ -297,7 +307,7 @@ static void write_to_master(Ozterm* terminal, const char* data, int32_t size)
     }
 }
 
-void ozterm_switch_to_alt_screen(Ozterm* terminal)
+static void ozterm_switch_to_alt_screen(Ozterm* terminal)
 {
     terminal->alternative_active = 1;
     terminal->screen_active = terminal->screen_alternative;
@@ -312,7 +322,7 @@ void ozterm_switch_to_alt_screen(Ozterm* terminal)
     }
 }
 
-void ozterm_restore_main_screen(Ozterm* terminal)
+static void ozterm_restore_main_screen(Ozterm* terminal)
 {
     terminal->alternative_active = 0;
     terminal->screen_active = terminal->screen_main;
@@ -1233,7 +1243,7 @@ static void ozterm_put_character(Ozterm* terminal, uint8_t c)
     }
 }
 
-static void ozterm_put_text(Ozterm* terminal, const uint8_t* text, int32_t size)
+void ozterm_put_text(Ozterm* terminal, const uint8_t* text, int32_t size)
 {
     const uint8_t* c = text;
     int32_t i = 0;

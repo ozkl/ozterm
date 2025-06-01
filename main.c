@@ -62,6 +62,9 @@ static SDL_Texture* g_glyph_cache[128];
 static int g_refresh_screen = 0;
 static int g_master_fd = -1;
 
+static TTF_Font* g_font = NULL;
+static SDL_Renderer* g_renderer = NULL;
+
 typedef struct Terminal
 {
     Ozterm * term;
@@ -69,6 +72,8 @@ typedef struct Terminal
     int scrollbar_drag_start_y;
     int scrollbar_scroll_start_offset;
 } Terminal;
+
+static Terminal* g_terminal = NULL;
 
 SDL_Color g_ansi_colors[16] = {
     {0, 0, 0},       // Black
@@ -89,13 +94,6 @@ SDL_Color g_ansi_colors[16] = {
     {0, 255, 255},   // Bright Cyan
     {255, 255, 255}  // Bright White
 };
-
-
-
-void measure_glyph_size(TTF_Font* font)
-{
-    TTF_SizeText(font, "M", &g_font_width, &g_font_height);  // "M" is usually the widest monospaced char
-}
 
 void build_g_glyph_cache(SDL_Renderer* renderer, TTF_Font* font, SDL_Color fg)
 {
@@ -153,18 +151,19 @@ void draw_scrollbar(SDL_Renderer* renderer, Ozterm* term)
 
 void draw_cursor(SDL_Renderer* renderer, Ozterm* term)
 {
+    int16_t scroll_offset = ozterm_get_scroll(term);
+
+    // Only draw the cursor when not scrolled
+    if (scroll_offset != 0)
+        return;
+
     int16_t cursor_row = ozterm_get_cursor_row(term);
     int16_t cursor_column = ozterm_get_cursor_column(term);
 
     OztermCell* row = ozterm_get_row_data(term, cursor_row);
     OztermCell* cell = row + cursor_column;
 
-    SDL_Rect dst = {
-        cursor_column * g_font_width,
-        cursor_row * g_font_height,
-        g_font_width,
-        g_font_height
-    };
+    SDL_Rect dst = {cursor_column * g_font_width, cursor_row * g_font_height, g_font_width, g_font_height};
 
     //reverse
     uint8_t bg = cell->fg_color;
@@ -196,8 +195,34 @@ void draw_cursor(SDL_Renderer* renderer, Ozterm* term)
     }
 }
 
-void render_screen(SDL_Renderer* renderer, TTF_Font* font, Ozterm* term)
+static void render_character(SDL_Renderer* renderer, int x, int y, OztermCell* cell)
 {
+    char ch = cell->character;
+    if (ch >= 32 && ch < 127)
+    {
+        SDL_Rect dst = {x * g_font_width, y * g_font_height, g_font_width, g_font_height};
+
+        if (cell->bg_color >= 0 && cell->bg_color < sizeof(g_ansi_colors))
+        {
+            SDL_Color bg = g_ansi_colors[cell->bg_color];
+            SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, 255);
+            SDL_RenderFillRect(renderer, &dst);
+        }
+
+        if (cell->fg_color >= 0 && cell->fg_color < sizeof(g_ansi_colors))
+        {
+            SDL_Color fg = g_ansi_colors[cell->fg_color];
+            SDL_SetTextureColorMod(g_glyph_cache[ch], fg.r, fg.g, fg.b);
+        }
+
+        SDL_RenderCopy(renderer, g_glyph_cache[(int)ch], NULL, &dst);
+    }
+}
+
+void render_screen(SDL_Renderer* renderer, TTF_Font* font)
+{
+    Ozterm* term = g_terminal->term;
+
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
@@ -214,37 +239,16 @@ void render_screen(SDL_Renderer* renderer, TTF_Font* font, Ozterm* term)
 
             OztermCell* cell = row + x;
 
-            char ch = cell->character;
-            if (ch >= 32 && ch < 127)
-            {
-                if (cell->bg_color >= 0 && cell->bg_color < sizeof(g_ansi_colors))
-                {
-                    SDL_Color bg = g_ansi_colors[cell->bg_color];
-                    SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, 255);
-                    SDL_RenderFillRect(renderer, &dst);
-                }
-
-                if (cell->fg_color >= 0 && cell->fg_color < sizeof(g_ansi_colors))
-                {
-                    SDL_Color fg = g_ansi_colors[cell->fg_color];
-                    SDL_SetTextureColorMod(g_glyph_cache[ch], fg.r, fg.g, fg.b);
-                }
-
-                SDL_RenderCopy(renderer, g_glyph_cache[(int)ch], NULL, &dst);
-            }
+            render_character(renderer, x, y, cell);
         }
     }
 
     int16_t scroll_offset = ozterm_get_scroll(term);
 
-    
-
     if (scroll_offset > 0)
         draw_scrollbar(renderer, term);
-    else if (scroll_offset == 0)
-        draw_cursor(renderer, term); // Only draw the cursor when not scrolled
 
-    SDL_RenderPresent(renderer);
+    draw_cursor(renderer, term);
 }
 
 
@@ -265,8 +269,6 @@ static void terminal_set_character(Ozterm* term, int16_t row, int16_t column, Oz
 {
     //TODO: optimize by only updating individual characters not full screen
     g_refresh_screen = 1;
-
-    ozterm_scroll(term, 0);
 }
 
 static void terminal_move_cursor(Ozterm* term, int16_t old_row, int16_t old_column, int16_t row, int16_t column)
@@ -288,23 +290,22 @@ static void update_pty_winsize(int fd, int cols, int rows)
     ioctl(fd, TIOCSWINSZ, &ws);
 }
 
-
 int main()
 {
     SDL_Init(SDL_INIT_VIDEO);
     TTF_Init();
     
-    TTF_Font* font = TTF_OpenFont("fonts/DejaVuSansMono.ttf", FONT_SIZE);
-    if (!font)
+    g_font = TTF_OpenFont("fonts/DejaVuSansMono.ttf", FONT_SIZE);
+    if (!g_font)
     {
         fprintf(stderr, "Failed to load font: %s\n", TTF_GetError());
         exit(1);
     }
 
-    measure_glyph_size(font);
+    TTF_SizeText(g_font, "M", &g_font_width, &g_font_height);  // "M" is usually the widest monospaced char
 
     SDL_Window* win = SDL_CreateWindow("Ozterm", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, COLS * g_font_width, ROWS * g_font_height, 0);
-    SDL_Renderer* renderer = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+    g_renderer = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
 
     pid_t pid = forkpty(&g_master_fd, NULL, NULL, NULL);
 
@@ -328,18 +329,17 @@ int main()
     int running = 1;
     char buf[8192];
 
-    build_g_glyph_cache(renderer, font, white);
+    build_g_glyph_cache(g_renderer, g_font, white);
 
-    Terminal terminal;
-    memset(&terminal, 0, sizeof(Terminal));
+    Terminal* terminal = malloc(sizeof(Terminal));
+    g_terminal = terminal;
+    memset(terminal, 0, sizeof(Terminal));
 
     Ozterm * term = ozterm_create(ROWS, COLS);
     ozterm_set_write_to_master_callback(term, write_to_master);
     ozterm_set_render_callbacks(term, terminal_refresh, terminal_set_character, terminal_move_cursor);
-    ozterm_set_custom_data(term, &terminal);
-
-    terminal.term = term;
-
+    ozterm_set_custom_data(term, terminal);
+    terminal->term = term;
 
     while (running)
     {
@@ -348,7 +348,7 @@ int main()
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(g_master_fd, &fds);
-        struct timeval tv = {0, 10000}; // 10ms
+        struct timeval tv = {0, 1000}; // 1ms
         select(g_master_fd + 1, &fds, NULL, NULL, &tv);
 
         if (FD_ISSET(g_master_fd, &fds))
@@ -361,7 +361,7 @@ int main()
         }
 
         SDL_Event e;
-        SDL_WaitEventTimeout(&e, 15);
+        SDL_WaitEventTimeout(&e, 1);
         if (e.type == SDL_QUIT)
         {
             running = 0;
@@ -447,40 +447,41 @@ int main()
             int mouse_x = e.button.x;
             int mouse_y = e.button.y;
 
-            int scrollbar_x = ozterm_get_column_count(terminal.term) * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
+            int scrollbar_x = ozterm_get_column_count(terminal->term) * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
             if (mouse_x >= scrollbar_x)
             {
-                terminal.scrollbar_dragging = 1;
-                terminal.scrollbar_drag_start_y = mouse_y;
-                terminal.scrollbar_scroll_start_offset = ozterm_get_scroll(terminal.term);
+                terminal->scrollbar_dragging = 1;
+                terminal->scrollbar_drag_start_y = mouse_y;
+                terminal->scrollbar_scroll_start_offset = ozterm_get_scroll(terminal->term);
             }
         }
         else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT)
         {
-            terminal.scrollbar_dragging = 0;
+            terminal->scrollbar_dragging = 0;
         }
-        else if (e.type == SDL_MOUSEMOTION && terminal.scrollbar_dragging)
+        else if (e.type == SDL_MOUSEMOTION && terminal->scrollbar_dragging)
         {
-            int total_scroll = ozterm_get_scroll_count(terminal.term);
+            int total_scroll = ozterm_get_scroll_count(terminal->term);
             if (total_scroll > 0)
             {
-                int delta_y = e.motion.y - terminal.scrollbar_drag_start_y;
+                int delta_y = e.motion.y - terminal->scrollbar_drag_start_y;
 
-                int win_height = ozterm_get_row_count(terminal.term) * g_font_height;
-                int height = win_height - get_scrollbar_height(terminal.term);
+                int win_height = ozterm_get_row_count(terminal->term) * g_font_height;
+                int height = win_height - get_scrollbar_height(terminal->term);
                 float ratio = (float)delta_y / (float)height;
 
-                int new_offset = terminal.scrollbar_scroll_start_offset + (int)(-ratio * total_scroll);
+                int new_offset = terminal->scrollbar_scroll_start_offset + (int)(-ratio * total_scroll);
                 if (new_offset < 0) new_offset = 0;
                 if (new_offset > total_scroll) new_offset = total_scroll;
 
-                ozterm_scroll(terminal.term, new_offset);
+                ozterm_scroll(terminal->term, new_offset);
             }
         }
-        
+
         if (g_refresh_screen)
         {
-            render_screen(renderer, font, term);
+            render_screen(g_renderer, g_font);
+            SDL_RenderPresent(g_renderer);
         }
     }
 
