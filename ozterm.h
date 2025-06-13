@@ -32,11 +32,20 @@
 
 typedef struct Ozterm Ozterm;
 
+typedef struct OztermColor
+{
+    uint8_t index;
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+    uint8_t use_rgb;
+} OztermColor;
+
 typedef struct OztermCell
 {
     uint8_t character;
-    uint8_t fg_color;
-    uint8_t bg_color;
+    OztermColor fg_color;
+    OztermColor bg_color;
 } OztermCell;
 
 typedef void (*OztermRefresh)(Ozterm* terminal);
@@ -97,8 +106,8 @@ int16_t ozterm_get_column_count(Ozterm* terminal);
 int16_t ozterm_get_cursor_row(Ozterm* terminal);
 int16_t ozterm_get_cursor_column(Ozterm* terminal);
 OztermCell* ozterm_get_row_data(Ozterm* terminal, int16_t row);
-void ozterm_set_default_color(Ozterm* terminal, uint8_t fg, uint8_t bg);
-void ozterm_get_default_color(Ozterm* terminal, uint8_t* fg, uint8_t* bg);
+void ozterm_set_default_color(Ozterm* terminal, OztermColor fg, OztermColor bg);
+void ozterm_get_default_color(Ozterm* terminal, OztermColor* fg, OztermColor* bg);
 void ozterm_put_text(Ozterm* terminal, const uint8_t* text, int32_t size);
 
 //this is scroll back mechanism, not related to the scrolling inside page or region

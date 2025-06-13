@@ -95,6 +95,39 @@ SDL_Color g_ansi_colors[16] = {
     {255, 255, 255}  // Bright White
 };
 
+#include <SDL.h>
+
+// Build on your existing ANSI 16‐color table
+extern SDL_Color g_ansi_colors[16];
+
+// Convert an xterm-256 color index into an SDL_Color
+SDL_Color xterm256_to_sdl(int idx) {
+    SDL_Color c = {0,0,0,255};
+    if (idx >= 0 && idx < 16) {
+        // standard ANSI
+        return g_ansi_colors[idx];
+    }
+    else if (idx >= 16 && idx <= 231) {
+        // 6×6×6 cube
+        int ci = idx - 16;
+        int blue  = (ci % 6);
+        int green = (ci / 6) % 6;
+        int red   = (ci / 36) % 6;
+        // each step is 51 (0x33) to cover 0–255
+        c.r = red   * 51;
+        c.g = green * 51;
+        c.b = blue  * 51;
+    }
+    else if (idx >= 232 && idx <= 255) {
+        // gray ramp, 24 steps from ~8 to ~238
+        int gi = idx - 232;
+        uint8_t level = 8 + gi * 10;
+        c.r = c.g = c.b = level;
+    }
+    return c;
+}
+
+
 void build_g_glyph_cache(SDL_Renderer* renderer, TTF_Font* font, SDL_Color fg)
 {
     for (int i = 32; i < 127; ++i)
@@ -166,30 +199,25 @@ void draw_cursor(SDL_Renderer* renderer, Ozterm* term)
     SDL_Rect dst = {cursor_column * g_font_width, cursor_row * g_font_height, g_font_width, g_font_height};
 
     //reverse
-    uint8_t bg = cell->fg_color;
-    uint8_t fg = cell->bg_color;
+    OztermColor bg = cell->fg_color;
+    OztermColor fg = cell->bg_color;
 
-    if (bg == fg)
+    if (bg.index == fg.index)
     {
         //fallback to default reverse
         ozterm_get_default_color(term, &bg, &fg);
     }
 
-    if (bg >= 0 && bg < sizeof(g_ansi_colors))
-    {
-        SDL_Color color = g_ansi_colors[bg];
-        SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
-        SDL_RenderFillRect(renderer, &dst);
-    }
+    
+    SDL_Color color = xterm256_to_sdl(bg.index);
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+    SDL_RenderFillRect(renderer, &dst);
 
     char ch = cell->character;
     if (ch >= 32 && ch < 127)
     {
-        if (fg >= 0 && fg < sizeof(g_ansi_colors))
-        {
-            SDL_Color color = g_ansi_colors[fg];
-            SDL_SetTextureColorMod(g_glyph_cache[ch], color.r, color.g, color.b);
-        }
+        SDL_Color color = xterm256_to_sdl(fg.index);
+        SDL_SetTextureColorMod(g_glyph_cache[ch], color.r, color.g, color.b);
 
         SDL_RenderCopy(renderer, g_glyph_cache[(int)ch], NULL, &dst);
     }
@@ -202,18 +230,33 @@ static void render_character(SDL_Renderer* renderer, int x, int y, OztermCell* c
     {
         SDL_Rect dst = {x * g_font_width, y * g_font_height, g_font_width, g_font_height};
 
-        if (cell->bg_color >= 0 && cell->bg_color < sizeof(g_ansi_colors))
-        {
-            SDL_Color bg = g_ansi_colors[cell->bg_color];
-            SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, 255);
-            SDL_RenderFillRect(renderer, &dst);
-        }
+        SDL_Color bg = xterm256_to_sdl(0);
+        SDL_Color fg = xterm256_to_sdl(0);
 
-        if (cell->fg_color >= 0 && cell->fg_color < sizeof(g_ansi_colors))
+        if (cell->bg_color.use_rgb)
         {
-            SDL_Color fg = g_ansi_colors[cell->fg_color];
-            SDL_SetTextureColorMod(g_glyph_cache[ch], fg.r, fg.g, fg.b);
+            bg.r = cell->bg_color.red;
+            bg.g = cell->bg_color.green;
+            bg.b = cell->bg_color.blue;
         }
+        else
+        {
+            bg = xterm256_to_sdl(cell->bg_color.index);
+        }
+        SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, 255);
+        SDL_RenderFillRect(renderer, &dst);
+
+        if (cell->fg_color.use_rgb)
+        {
+            fg.r = cell->fg_color.red;
+            fg.g = cell->fg_color.green;
+            fg.b = cell->fg_color.blue;
+        }
+        else
+        {
+            fg = xterm256_to_sdl(cell->fg_color.index);
+        }
+        SDL_SetTextureColorMod(g_glyph_cache[ch], fg.r, fg.g, fg.b);
 
         SDL_RenderCopy(renderer, g_glyph_cache[(int)ch], NULL, &dst);
     }
@@ -348,7 +391,7 @@ int main()
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(g_master_fd, &fds);
-        struct timeval tv = {0, 1000}; // 1ms
+        struct timeval tv = {0, 0}; // 1ms
         select(g_master_fd + 1, &fds, NULL, NULL, &tv);
 
         if (FD_ISSET(g_master_fd, &fds))
@@ -361,120 +404,122 @@ int main()
         }
 
         SDL_Event e;
-        SDL_WaitEventTimeout(&e, 1);
-        if (e.type == SDL_QUIT)
+        while (SDL_PollEvent(&e))
         {
-            running = 0;
-        }
-        else if (e.type == SDL_KEYDOWN)
-        {
-            uint8_t terminal_key = OZTERM_KEY_NONE;
-
-            SDL_Keycode sdl_key = e.key.keysym.sym;
-
-            SDL_Keymod mod = SDL_GetModState();
-            uint8_t modifier = 0;
-
-            if (mod & KMOD_LSHIFT) modifier |= OZTERM_KEYM_LEFTSHIFT;
-            if (mod & KMOD_RSHIFT) modifier |= OZTERM_KEYM_RIGHTSHIFT;
-            if (mod & KMOD_CTRL)   modifier |= OZTERM_KEYM_CTRL;
-            if (mod & KMOD_ALT)    modifier |= OZTERM_KEYM_ALT;
-
-            switch (sdl_key)
+            if (e.type == SDL_QUIT)
             {
-                case SDLK_RETURN:   terminal_key = OZTERM_KEY_RETURN; break;
-                case SDLK_BACKSPACE:terminal_key = OZTERM_KEY_BACKSPACE; break;
-                case SDLK_ESCAPE:   terminal_key = OZTERM_KEY_ESCAPE; break;
-                case SDLK_TAB:      terminal_key = OZTERM_KEY_TAB; break;
-                case SDLK_DOWN:     terminal_key = OZTERM_KEY_DOWN; break;
-                case SDLK_UP:       terminal_key = OZTERM_KEY_UP; break;
-                case SDLK_LEFT:     terminal_key = OZTERM_KEY_LEFT; break;
-                case SDLK_RIGHT:    terminal_key = OZTERM_KEY_RIGHT; break;
-                case SDLK_HOME:     terminal_key = OZTERM_KEY_HOME; break;
-                case SDLK_END:      terminal_key = OZTERM_KEY_END; break;
-                case SDLK_PAGEUP:   terminal_key = OZTERM_KEY_PAGEUP; break;
-                case SDLK_PAGEDOWN: terminal_key = OZTERM_KEY_PAGEDOWN; break;
-                case SDLK_F1:  terminal_key = OZTERM_KEY_F1; break;
-                case SDLK_F2:  terminal_key = OZTERM_KEY_F2; break;
-                case SDLK_F3:  terminal_key = OZTERM_KEY_F3; break;
-                case SDLK_F4:  terminal_key = OZTERM_KEY_F4; break;
-                case SDLK_F5:  terminal_key = OZTERM_KEY_F5; break;
-                case SDLK_F6:  terminal_key = OZTERM_KEY_F6; break;
-                case SDLK_F7:  terminal_key = OZTERM_KEY_F7; break;
-                case SDLK_F8:  terminal_key = OZTERM_KEY_F8; break;
-                case SDLK_F9:  terminal_key = OZTERM_KEY_F9; break;
-                case SDLK_F10: terminal_key = OZTERM_KEY_F10; break;
-                case SDLK_F11: terminal_key = OZTERM_KEY_F11; break;
-                case SDLK_F12: terminal_key = OZTERM_KEY_F12; break;
-
-                default:
-                    //we do not send character keys here, it is SDL_TEXTINPUT's job
-                    break;
+                running = 0;
             }
-
-            if (terminal_key == OZTERM_KEY_NONE)
+            else if (e.type == SDL_KEYDOWN)
             {
-                if (modifier & OZTERM_KEYM_CTRL)
+                uint8_t terminal_key = OZTERM_KEY_NONE;
+
+                SDL_Keycode sdl_key = e.key.keysym.sym;
+
+                SDL_Keymod mod = SDL_GetModState();
+                uint8_t modifier = 0;
+
+                if (mod & KMOD_LSHIFT) modifier |= OZTERM_KEYM_LEFTSHIFT;
+                if (mod & KMOD_RSHIFT) modifier |= OZTERM_KEYM_RIGHTSHIFT;
+                if (mod & KMOD_CTRL)   modifier |= OZTERM_KEYM_CTRL;
+                if (mod & KMOD_ALT)    modifier |= OZTERM_KEYM_ALT;
+
+                switch (sdl_key)
                 {
-                    if (sdl_key >= 0 && sdl_key < 128)
+                    case SDLK_RETURN:   terminal_key = OZTERM_KEY_RETURN; break;
+                    case SDLK_BACKSPACE:terminal_key = OZTERM_KEY_BACKSPACE; break;
+                    case SDLK_ESCAPE:   terminal_key = OZTERM_KEY_ESCAPE; break;
+                    case SDLK_TAB:      terminal_key = OZTERM_KEY_TAB; break;
+                    case SDLK_DOWN:     terminal_key = OZTERM_KEY_DOWN; break;
+                    case SDLK_UP:       terminal_key = OZTERM_KEY_UP; break;
+                    case SDLK_LEFT:     terminal_key = OZTERM_KEY_LEFT; break;
+                    case SDLK_RIGHT:    terminal_key = OZTERM_KEY_RIGHT; break;
+                    case SDLK_HOME:     terminal_key = OZTERM_KEY_HOME; break;
+                    case SDLK_END:      terminal_key = OZTERM_KEY_END; break;
+                    case SDLK_PAGEUP:   terminal_key = OZTERM_KEY_PAGEUP; break;
+                    case SDLK_PAGEDOWN: terminal_key = OZTERM_KEY_PAGEDOWN; break;
+                    case SDLK_F1:  terminal_key = OZTERM_KEY_F1; break;
+                    case SDLK_F2:  terminal_key = OZTERM_KEY_F2; break;
+                    case SDLK_F3:  terminal_key = OZTERM_KEY_F3; break;
+                    case SDLK_F4:  terminal_key = OZTERM_KEY_F4; break;
+                    case SDLK_F5:  terminal_key = OZTERM_KEY_F5; break;
+                    case SDLK_F6:  terminal_key = OZTERM_KEY_F6; break;
+                    case SDLK_F7:  terminal_key = OZTERM_KEY_F7; break;
+                    case SDLK_F8:  terminal_key = OZTERM_KEY_F8; break;
+                    case SDLK_F9:  terminal_key = OZTERM_KEY_F9; break;
+                    case SDLK_F10: terminal_key = OZTERM_KEY_F10; break;
+                    case SDLK_F11: terminal_key = OZTERM_KEY_F11; break;
+                    case SDLK_F12: terminal_key = OZTERM_KEY_F12; break;
+
+                    default:
+                        //we do not send character keys here, it is SDL_TEXTINPUT's job
+                        break;
+                }
+
+                if (terminal_key == OZTERM_KEY_NONE)
+                {
+                    if (modifier & OZTERM_KEYM_CTRL)
                     {
-                        terminal_key = sdl_key;
+                        if (sdl_key >= 0 && sdl_key < 128)
+                        {
+                            terminal_key = sdl_key;
+                        }
                     }
                 }
+
+                if (terminal_key != OZTERM_KEY_NONE)
+                {
+                    ozterm_send_key(term, modifier, terminal_key);
+                }
             }
-
-            if (terminal_key != OZTERM_KEY_NONE)
+            else if (e.type == SDL_TEXTINPUT)
             {
-                ozterm_send_key(term, modifier, terminal_key);
+                if (!(SDL_GetModState() & (KMOD_CTRL | KMOD_ALT)))
+                {
+                    ozterm_send_key(term, OZTERM_KEYM_NONE, e.text.text[0]);
+                }
             }
-        }
-        else if (e.type == SDL_TEXTINPUT)
-        {
-            if (!(SDL_GetModState() & (KMOD_CTRL | KMOD_ALT)))
+            else if (e.type == SDL_MOUSEWHEEL)
             {
-                ozterm_send_key(term, OZTERM_KEYM_NONE, e.text.text[0]);
+                if (e.wheel.y > 0)
+                    ozterm_scroll(term, ozterm_get_scroll(term) + 3);
+                else if (e.wheel.y < 0)
+                    ozterm_scroll(term, ozterm_get_scroll(term) - 3);
             }
-        }
-        else if (e.type == SDL_MOUSEWHEEL)
-        {
-            if (e.wheel.y > 0)
-                ozterm_scroll(term, ozterm_get_scroll(term) + 3);
-            else if (e.wheel.y < 0)
-                ozterm_scroll(term, ozterm_get_scroll(term) - 3);
-        }
-        else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT)
-        {
-            int mouse_x = e.button.x;
-            int mouse_y = e.button.y;
-
-            int scrollbar_x = ozterm_get_column_count(terminal->term) * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
-            if (mouse_x >= scrollbar_x)
+            else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT)
             {
-                terminal->scrollbar_dragging = 1;
-                terminal->scrollbar_drag_start_y = mouse_y;
-                terminal->scrollbar_scroll_start_offset = ozterm_get_scroll(terminal->term);
+                int mouse_x = e.button.x;
+                int mouse_y = e.button.y;
+
+                int scrollbar_x = ozterm_get_column_count(terminal->term) * g_font_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
+                if (mouse_x >= scrollbar_x)
+                {
+                    terminal->scrollbar_dragging = 1;
+                    terminal->scrollbar_drag_start_y = mouse_y;
+                    terminal->scrollbar_scroll_start_offset = ozterm_get_scroll(terminal->term);
+                }
             }
-        }
-        else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT)
-        {
-            terminal->scrollbar_dragging = 0;
-        }
-        else if (e.type == SDL_MOUSEMOTION && terminal->scrollbar_dragging)
-        {
-            int total_scroll = ozterm_get_scroll_count(terminal->term);
-            if (total_scroll > 0)
+            else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT)
             {
-                int delta_y = e.motion.y - terminal->scrollbar_drag_start_y;
+                terminal->scrollbar_dragging = 0;
+            }
+            else if (e.type == SDL_MOUSEMOTION && terminal->scrollbar_dragging)
+            {
+                int total_scroll = ozterm_get_scroll_count(terminal->term);
+                if (total_scroll > 0)
+                {
+                    int delta_y = e.motion.y - terminal->scrollbar_drag_start_y;
 
-                int win_height = ozterm_get_row_count(terminal->term) * g_font_height;
-                int height = win_height - get_scrollbar_height(terminal->term);
-                float ratio = (float)delta_y / (float)height;
+                    int win_height = ozterm_get_row_count(terminal->term) * g_font_height;
+                    int height = win_height - get_scrollbar_height(terminal->term);
+                    float ratio = (float)delta_y / (float)height;
 
-                int new_offset = terminal->scrollbar_scroll_start_offset + (int)(-ratio * total_scroll);
-                if (new_offset < 0) new_offset = 0;
-                if (new_offset > total_scroll) new_offset = total_scroll;
+                    int new_offset = terminal->scrollbar_scroll_start_offset + (int)(-ratio * total_scroll);
+                    if (new_offset < 0) new_offset = 0;
+                    if (new_offset > total_scroll) new_offset = total_scroll;
 
-                ozterm_scroll(terminal->term, new_offset);
+                    ozterm_scroll(terminal->term, new_offset);
+                }
             }
         }
 

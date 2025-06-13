@@ -37,8 +37,8 @@ typedef struct OztermScreen
     OztermCell* buffer;
     int16_t cursor_row;
     int16_t cursor_column;
-    uint8_t fg_color;
-    uint8_t bg_color;
+    OztermColor fg_color;
+    OztermColor bg_color;
     uint8_t attr_inverse;
 } OztermScreen;
 
@@ -54,8 +54,8 @@ typedef struct Ozterm
     int16_t column_count;
     int16_t scroll_top;
     int16_t scroll_bottom;
-    uint8_t fg_color_default;
-    uint8_t bg_color_default;
+    OztermColor fg_color_default;
+    OztermColor bg_color_default;
     uint8_t DECCKM;
     void* custom_data;
     OztermCell** scrollback;     // Array of pointers to lines
@@ -131,8 +131,8 @@ Ozterm* ozterm_create(uint16_t row_count, uint16_t column_count)
     terminal->row_count = row_count;
     terminal->scroll_top = 0;
     terminal->scroll_bottom = terminal->row_count - 1;
-    terminal->fg_color_default = 7;
-    terminal->bg_color_default = 0;
+    terminal->fg_color_default.index = 7;
+    terminal->bg_color_default.index = 0;
 
     terminal->scrollback = malloc_impl(sizeof(OztermCell*) * SCROLLBACK_LINES);
     for (int i = 0; i < SCROLLBACK_LINES; ++i)
@@ -246,13 +246,13 @@ OztermCell* ozterm_get_row_data(Ozterm* terminal, int16_t row)
     return row_buffer;
 }
 
-void ozterm_set_default_color(Ozterm* terminal, uint8_t fg, uint8_t bg)
+void ozterm_set_default_color(Ozterm* terminal, OztermColor fg, OztermColor bg)
 {
     terminal->fg_color_default = fg;
     terminal->bg_color_default = bg;
 }
 
-void ozterm_get_default_color(Ozterm* terminal, uint8_t* fg, uint8_t* bg)
+void ozterm_get_default_color(Ozterm* terminal, OztermColor* fg, OztermColor* bg)
 {
     *fg = terminal->fg_color_default;
     *bg = terminal->bg_color_default;
@@ -1037,13 +1037,25 @@ static void ozterm_put_character(Ozterm* terminal, uint8_t c)
                                 if (code == 0)
                                     ozterm_reset_attributes(terminal);
                                 else if (code >= 30 && code <= 37)
-                                    terminal->screen_active->fg_color = code - 30;
+                                {
+                                    terminal->screen_active->fg_color.index = code - 30;
+                                    terminal->screen_active->fg_color.use_rgb = 0;
+                                }
                                 else if (code >= 40 && code <= 47)
-                                    terminal->screen_active->bg_color = code - 40;
+                                {
+                                    terminal->screen_active->bg_color.index = code - 40;
+                                    terminal->screen_active->bg_color.use_rgb = 0;
+                                }
                                 else if (code >= 90 && code <= 97)
-                                    terminal->screen_active->fg_color = code - 90 + 8;
+                                {
+                                    terminal->screen_active->fg_color.index = code - 90 + 8;
+                                    terminal->screen_active->fg_color.use_rgb = 0;
+                                }
                                 else if (code >= 100 && code <= 107)
-                                    terminal->screen_active->bg_color = code - 100 + 8;
+                                {
+                                    terminal->screen_active->bg_color.index = code - 100 + 8;
+                                    terminal->screen_active->bg_color.use_rgb = 0;
+                                }
                                 else if (code == 7)
                                     terminal->screen_active->attr_inverse = 1;
                                 else if (code == 27)
@@ -1052,6 +1064,55 @@ static void ozterm_put_character(Ozterm* terminal, uint8_t c)
                                     terminal->screen_active->fg_color = terminal->fg_color_default;
                                 else if (code == 49)
                                     terminal->screen_active->bg_color = terminal->bg_color_default;
+                                else if (code == 38 || code == 48)
+                                {
+                                    // Extended color: 5;<idx> = 256-color, 2;<r>;<g>;<b> = truecolor
+                                    // ptr p is right after the “38” or “48”
+                                    if (*p == ';') p++;               // skip the ‘;’
+                                    int mode = strtol(p, &p, 10);
+                                    if (mode == 5 && *p == ';')
+                                    {
+                                        // 256-color mode
+                                        p++;
+                                        int idx = strtol(p, &p, 10);
+                                        if (code == 38)
+                                        {
+                                            terminal->screen_active->fg_color.index = (uint8_t)idx;
+                                            terminal->screen_active->fg_color.use_rgb = 0;
+                                        }
+                                        else
+                                        {
+                                            terminal->screen_active->bg_color.index = (uint8_t)idx;
+                                            terminal->screen_active->bg_color.use_rgb = 0;
+                                        }
+                                    }
+                                    else if (mode == 2 && *p == ';') {
+                                        // true-color mode (r;g;b)
+                                        p++;
+                                        int r = strtol(p, &p, 10);
+                                        if (*p == ';') p++;
+                                        int g = strtol(p, &p, 10);
+                                        if (*p == ';') p++;
+                                        int b = strtol(p, &p, 10);
+                                        if (code == 38)
+                                        {
+                                            terminal->screen_active->fg_color.red = (uint8_t)r;
+                                            terminal->screen_active->fg_color.green = (uint8_t)g;
+                                            terminal->screen_active->fg_color.blue = (uint8_t)b;
+                                            terminal->screen_active->fg_color.use_rgb = 1;
+                                        }
+                                        else
+                                        {
+                                            terminal->screen_active->bg_color.red = (uint8_t)r;
+                                            terminal->screen_active->bg_color.green = (uint8_t)g;
+                                            terminal->screen_active->bg_color.blue = (uint8_t)b;
+                                            terminal->screen_active->bg_color.use_rgb = 1;
+                                        }
+                                    }
+                                    // else: unsupported sub-mode, ignore
+                                }
+                                else
+                                    handled = 0;
 
                                 if (*p == ';') p++;  // skip to next param
                             }
